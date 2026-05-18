@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Price Tracker</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://unpkg.com/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="header-brand">
+        <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        <span class="header-title">Price Tracker</span>
+      </div>
+      <div class="header-actions">
+        <span class="last-updated" id="lastUpdated">—</span>
+        <button class="btn btn-outline" id="refreshBtn" onclick="manualRefresh()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <polyline points="23 4 23 10 17 10"/>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+          </svg>
+          Обновить цены
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Add Product Form -->
+  <section class="add-section">
+    <div class="container">
+      <div class="add-card">
+        <h2 class="add-title">Добавить товар</h2>
+        <form class="add-form" id="addForm" onsubmit="addProduct(event)">
+          <div class="form-group">
+            <label class="form-label" for="marketplace">Маркетплейс</label>
+            <select class="form-control" id="marketplace" required>
+              <option value="">Выберите маркетплейс</option>
+              <option value="wildberries">Wildberries</option>
+              <option value="ozon">Ozon</option>
+              <option value="yandex_market">Яндекс Маркет</option>
+              <option value="aliexpress">AliExpress</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="article">Артикул / ID товара</label>
+            <input
+              class="form-control"
+              type="text"
+              id="article"
+              placeholder="например: 123456789"
+              required
+            />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="threshold">Порог уведомления (%)</label>
+            <input
+              class="form-control"
+              type="number"
+              id="threshold"
+              value="5"
+              min="0.1"
+              max="100"
+              step="0.1"
+            />
+          </div>
+          <button class="btn btn-primary" type="submit" id="addBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            Добавить
+          </button>
+        </form>
+        <div class="form-error" id="formError"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Products Grid -->
+  <main class="main-section">
+    <div class="container">
+      <div class="section-header">
+        <h2 class="section-title">Отслеживаемые товары</h2>
+        <span class="product-count" id="productCount">0 товаров</span>
+      </div>
+      <div class="loading-state" id="loadingState">
+        <div class="spinner"></div>
+        <p>Загрузка товаров...</p>
+      </div>
+      <div class="empty-state" id="emptyState" style="display:none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="64" height="64">
+          <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/>
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <path d="M16 10a4 4 0 0 1-8 0"/>
+        </svg>
+        <h3>Нет отслеживаемых товаров</h3>
+        <p>Добавьте первый товар с помощью формы выше</p>
+      </div>
+      <div class="products-grid" id="productsGrid"></div>
+    </div>
+  </main>
+
+  <!-- Chart Modal -->
+  <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
+    <div class="modal" id="modal">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title" id="modalTitle">История цен</h3>
+          <p class="modal-subtitle" id="modalSubtitle"></p>
+        </div>
+        <button class="modal-close" onclick="closeModal()" aria-label="Закрыть">&times;</button>
+      </div>
+      <div class="modal-body">
+        <canvas id="modalChart"></canvas>
+      </div>
+      <div class="modal-stats" id="modalStats"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
