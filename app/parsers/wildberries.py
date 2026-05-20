@@ -41,7 +41,14 @@ _BASKET_BOUNDS = [
 
 class WildberriesParser(BaseParser):
     marketplace = "wb"
-    CARD_API = "https://card.wb.ru/cards/v2/detail"
+
+    # WB периодически меняет путь — пробуем известные варианты по порядку.
+    CARD_ENDPOINTS = (
+        "https://card.wb.ru/cards/v2/list",
+        "https://card.wb.ru/cards/v4/list",
+        "https://card.wb.ru/cards/v1/detail",
+        "https://card.wb.ru/cards/detail",
+    )
 
     headers = {
         **BaseParser.headers,
@@ -87,22 +94,30 @@ class WildberriesParser(BaseParser):
             "appType": "1",
             "curr": "rub",
             "dest": "-1257786",  # Москва (без региона WB иногда отдаёт 400)
-            "spp": "30",
-            "ab_testing": "false",
             "nm": sku,
         }
-        try:
-            resp = await self._get(self.CARD_API, params=params)
-            data = resp.json()
-        except ParserError:
-            raise
-        except Exception as e:
-            raise ParserError(f"WB: ошибка запроса: {e}") from e
 
-        try:
-            product = data["data"]["products"][0]
-        except (KeyError, IndexError, TypeError) as e:
-            raise ParserError(f"WB: товар {sku} не найден в ответе API") from e
+        last_error: Exception | None = None
+        product: dict | None = None
+        for endpoint in self.CARD_ENDPOINTS:
+            try:
+                resp = await self._get(endpoint, params=params)
+                data = resp.json()
+            except ParserError as e:
+                last_error = e
+                continue
+            except Exception as e:
+                last_error = ParserError(f"WB: ошибка запроса {endpoint}: {e}")
+                continue
+
+            products = (data.get("data") or {}).get("products") or []
+            if products:
+                product = products[0]
+                break
+            last_error = ParserError(f"WB: товар {sku} не найден ({endpoint})")
+
+        if product is None:
+            raise last_error or ParserError("WB: все эндпоинты вернули ошибку")
 
         price = self._extract_price(product)
         if price is None:

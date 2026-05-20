@@ -149,6 +149,46 @@ async def test_wb_parse_full(monkeypatch):
     assert "123456789" in result.image_url
 
 
+@pytest.mark.asyncio
+async def test_wb_falls_back_through_endpoints(monkeypatch):
+    """Первый эндпоинт даёт 404 — парсер должен попробовать следующий."""
+    parser = WildberriesParser()
+    calls = []
+
+    class GoodResp:
+        def json(self_):
+            return {"data": {"products": [{"name": "X", "sizes": [{"price": {"product": 10000}}]}]}}
+
+    async def fake_get(self_, url, **kw):
+        calls.append(url)
+        if url == WildberriesParser.CARD_ENDPOINTS[0]:
+            raise ParserError("WB: HTTP 404 ...")
+        if url == WildberriesParser.CARD_ENDPOINTS[1]:
+            # эндпоинт ответил, но товара нет
+            class Empty:
+                def json(self_inner):
+                    return {"data": {"products": []}}
+            return Empty()
+        return GoodResp()
+
+    monkeypatch.setattr(WildberriesParser, "_get", fake_get)
+    result = await parser.parse("https://www.wildberries.ru/catalog/100/detail.aspx")
+    assert result.price == Decimal("100.00")
+    assert len(calls) >= 3  # дошли до третьего эндпоинта
+
+
+@pytest.mark.asyncio
+async def test_wb_all_endpoints_fail(monkeypatch):
+    parser = WildberriesParser()
+
+    async def fake_get(self_, url, **kw):
+        raise ParserError("WB: HTTP 404 ...")
+
+    monkeypatch.setattr(WildberriesParser, "_get", fake_get)
+    with pytest.raises(ParserError):
+        await parser.parse("https://www.wildberries.ru/catalog/100/detail.aspx")
+
+
 # ---------- Ozon ----------
 
 def test_ozon_price_from_widget_card():
