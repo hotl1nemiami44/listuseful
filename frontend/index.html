@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Price Tracker</title>
+  <script src="https://unpkg.com/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <!-- Setup Screen -->
+  <div id="setup-screen" class="screen hidden">
+    <div class="setup-card">
+      <div class="setup-logo">📦</div>
+      <h1>Price Tracker</h1>
+      <p class="setup-desc">Отслеживайте цены на Wildberries, Ozon, Яндекс&nbsp;Маркет и AliExpress</p>
+      <div class="setup-steps">
+        <div class="step">
+          <span class="step-num">1</span>
+          <span>Откройте Telegram и найдите <a href="https://t.me/userinfobot" target="_blank">@userinfobot</a></span>
+        </div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <span>Нажмите <b>Start</b> — бот пришлёт ваш Chat ID</span>
+        </div>
+        <div class="step">
+          <span class="step-num">3</span>
+          <span>Вставьте его ниже</span>
+        </div>
+      </div>
+      <form id="setup-form">
+        <input id="chat-id-input" type="text" placeholder="Ваш Telegram Chat ID (например: 123456789)"
+               autocomplete="off" inputmode="numeric" />
+        <button type="submit" class="btn btn-primary">Начать</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div id="app-screen" class="screen hidden">
+    <header>
+      <div class="header-inner">
+        <div class="header-brand">
+          <span class="brand-icon">📦</span>
+          <span class="brand-name">Price Tracker</span>
+        </div>
+        <div class="header-actions">
+          <button id="refresh-btn" class="btn btn-icon" title="Обновить все цены">
+            <span class="icon">⟳</span>
+          </button>
+          <button id="settings-btn" class="btn btn-icon" title="Настройки">
+            <span class="icon">⚙</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <!-- Add Product Form -->
+      <section class="add-section">
+        <form id="add-form">
+          <div class="add-fields">
+            <input id="url-input" type="url" placeholder="Ссылка на товар (WB, Ozon, Яндекс.Маркет, AliExpress)"
+                   autocomplete="off" required />
+            <div class="threshold-wrap">
+              <label for="threshold-input">Порог</label>
+              <input id="threshold-input" type="number" min="0.1" max="100" step="0.1" value="5" />
+              <span class="pct-sign">%</span>
+            </div>
+            <button type="submit" class="btn btn-primary" id="add-btn">Добавить</button>
+          </div>
+          <div id="add-error" class="add-error hidden"></div>
+        </form>
+      </section>
+
+      <!-- Stats Bar -->
+      <div id="stats-bar" class="stats-bar hidden">
+        <span id="stat-total"></span>
+        <span id="stat-active"></span>
+        <span id="stat-dropped"></span>
+      </div>
+
+      <!-- Products Grid -->
+      <section id="products-grid" class="products-grid"></section>
+
+      <!-- Empty State -->
+      <div id="empty-state" class="empty-state hidden">
+        <div class="empty-icon">🛒</div>
+        <p>Список пуст — добавьте первый товар</p>
+      </div>
+
+      <!-- Loading State -->
+      <div id="loading-state" class="loading-state">
+        <div class="spinner"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- History Modal -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <div>
+          <div id="modal-title" class="modal-title"></div>
+          <div id="modal-marketplace" class="modal-marketplace"></div>
+        </div>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="modal-stats" class="modal-stats"></div>
+        <div class="chart-wrap">
+          <canvas id="modal-chart"></canvas>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <a id="modal-link" href="#" target="_blank" class="btn btn-outline">Открыть на сайте</a>
+        <button id="modal-check-btn" class="btn btn-secondary">Проверить сейчас</button>
+        <button id="modal-delete-btn" class="btn btn-danger">Удалить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-overlay" class="modal-overlay hidden">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <div class="modal-title">Настройки</div>
+        <button class="modal-close" onclick="closeSettings()">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="settings-label">Telegram Chat ID</label>
+        <div class="settings-row">
+          <input id="settings-chat-id" type="text" class="settings-input" />
+          <button class="btn btn-primary" onclick="saveChatId()">Сохранить</button>
+        </div>
+        <p class="settings-hint">Узнать ID: напишите <a href="https://t.me/userinfobot" target="_blank">@userinfobot</a> в Telegram</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

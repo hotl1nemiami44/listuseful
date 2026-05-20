@@ -1,7 +1,10 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -13,8 +16,10 @@ from app.parsers.base import ParserError
 from app.tasks.scheduler import start_scheduler, stop_scheduler
 from app.tasks.check_prices import check_single_product
 
-from fastapi.responses import RedirectResponse, Response
-
+logging.basicConfig(
+    level=settings.log_level,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 @asynccontextmanager
@@ -26,6 +31,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Price Tracker", lifespan=lifespan)
+
+_frontend = os.path.join(os.path.dirname(__file__), "..", "frontend")
+if os.path.isdir(_frontend):
+    app.mount("/static", StaticFiles(directory=_frontend), name="static")
 
 
 def get_or_create_user(db: Session, chat_id: str) -> User:
@@ -49,15 +58,18 @@ def current_user(
 def health():
     return {"status": "ok"}
 
+
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/docs")
+    index = os.path.join(_frontend, "index.html")
+    if os.path.isfile(index):
+        return FileResponse(index)
+    return {"message": "Price Tracker API"}
 
 
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return Response(status_code=204)
-logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 @app.post("/products", response_model=ProductOut, status_code=201)
