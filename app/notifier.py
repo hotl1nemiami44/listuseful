@@ -1,21 +1,25 @@
 import logging
 from decimal import Decimal
-
-from telegram import Bot
-from telegram.error import TelegramError
+from typing import Any
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_bot: Bot | None = None
+_bot: Any = None
 
 
-def get_bot() -> Bot:
+def get_bot() -> Any:
+    """Lazy-инициализация Telegram Bot.
+
+    Импорт `telegram` тяжёлый и в некоторых окружениях падает на
+    cryptography/cffi. Откладываем его, чтобы это не ломало запуск FastAPI.
+    """
     global _bot
     if _bot is None:
         if not settings.telegram_bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в .env")
+        from telegram import Bot  # noqa: WPS433 (lazy by design)
         _bot = Bot(token=settings.telegram_bot_token)
     return _bot
 
@@ -44,12 +48,12 @@ async def send_price_drop(
             await bot.send_photo(chat_id=chat_id, photo=image_url, caption=text, parse_mode="HTML")
         else:
             await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", disable_web_page_preview=False)
-    except TelegramError as e:
+    except Exception as e:
         logger.error("Telegram error for chat %s: %s", chat_id, e)
 
 
 async def send_text(chat_id: str, text: str) -> None:
     try:
         await get_bot().send_message(chat_id=chat_id, text=text, parse_mode="HTML")
-    except TelegramError as e:
+    except Exception as e:
         logger.error("Telegram error for chat %s: %s", chat_id, e)
