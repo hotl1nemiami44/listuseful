@@ -24,18 +24,38 @@ class YandexMarketParser(BaseParser):
         return "market.yandex.ru" in url
 
     async def parse(self, url: str) -> ParsedProduct:
+        html, source = await self._fetch_html(url)
+        result = self._try_extract(html)
+        if result is not None:
+            return result
+
+        # curl_cffi/httpx упёрся в капчу — пробуем Playwright (если установлен)
+        if source != "browser":
+            try:
+                resp = await self._get_browser(url, wait_selector='[data-auto="price-value"], script[type="application/ld+json"]')
+            except ParserError:
+                raise ParserError("YM: цена не найдена и Playwright недоступен/не помог")
+            result = self._try_extract(resp.text)
+            if result is not None:
+                return result
+
+        raise ParserError("YM: цена не найдена даже через Playwright")
+
+    async def _fetch_html(self, url: str) -> tuple[str, str]:
         try:
             resp = await self._get(url)
-        except ParserError:
-            raise
-        except Exception as e:
-            raise ParserError(f"YM: ошибка запроса: {e}") from e
+            return resp.text, "http"
+        except ParserError as e:
+            # 403/4xx → сразу пробуем браузер
+            try:
+                resp = await self._get_browser(url, wait_selector='[data-auto="price-value"], script[type="application/ld+json"]')
+                return resp.text, "browser"
+            except ParserError:
+                raise e
 
-        html = resp.text
-
-        # Проверка на antibot заглушку
-        if "captcha" in html.lower() or "Извините, мы не можем найти" in html:
-            raise ParserError("YM: страница вернула капчу/антибот — нужен прокси")
+    def _try_extract(self, html: str) -> ParsedProduct | None:
+        if "captcha" in html.lower() and "ld+json" not in html.lower():
+            return None
 
         # 1. JSON-LD — самый надёжный источник
         jsonld = find_jsonld_product(html)
@@ -52,7 +72,7 @@ class YandexMarketParser(BaseParser):
         image = self._extract_image(tree)
 
         if price is None:
-            raise ParserError("YM: цена не найдена (вероятно антибот-защита)")
+            return None
 
         return ParsedProduct(title=title, price=price, image_url=image)
 

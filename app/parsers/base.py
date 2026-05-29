@@ -7,11 +7,32 @@ from abc import ABC, abstractmethod
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
-import httpx
-
 from app.schemas import ParsedProduct
 
 logger = logging.getLogger(__name__)
+
+# curl_cffi подделывает TLS-fingerprint реального Chrome (JA3/JA4),
+# чем обходит антибот WB/Ozon/Я.Маркета — обычный httpx с его TLS они режут.
+# Импорт ленивый, чтобы тесты не требовали curl_cffi.
+try:
+    from curl_cffi.requests import AsyncSession as _CurlSession
+    _HAVE_CURL = True
+except Exception:  # pragma: no cover - окружения без curl_cffi
+    _CurlSession = None
+    _HAVE_CURL = False
+
+# httpx — резервный путь, если curl_cffi недоступен.
+import httpx
+
+# Playwright — последний фолбэк для сайтов с JS-челленджем (Я.Маркет SmartCaptcha,
+# Ozon антибот). Не требуется для запуска приложения, если не установлен —
+# парсеры просто не смогут использовать браузерный путь.
+try:
+    from playwright.async_api import async_playwright
+    _HAVE_PLAYWRIGHT = True
+except Exception:  # pragma: no cover
+    async_playwright = None
+    _HAVE_PLAYWRIGHT = False
 
 
 class ParserError(Exception):
@@ -20,13 +41,33 @@ class ParserError(Exception):
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+# Версия Chrome для импersonation в curl_cffi (TLS + HTTP/2 fingerprint)
+CURL_IMPERSONATE = "chrome124"
+
+
+class _Response:
+    """Унифицированный ответ — у curl_cffi и httpx разные API."""
+
+    __slots__ = ("status_code", "text", "_json", "url")
+
+    def __init__(self, status_code: int, text: str, url: str, json_data=None):
+        self.status_code = status_code
+        self.text = text
+        self._json = json_data
+        self.url = url
+
+    def json(self):
+        if self._json is not None:
+            return self._json
+        return json.loads(self.text)
 
 
 class BaseParser(ABC):
     marketplace: str = ""
-    timeout: float = 20.0
+    timeout: float = 25.0
 
     headers: dict = {
         "User-Agent": DEFAULT_UA,
@@ -56,20 +97,91 @@ class BaseParser(ABC):
         *,
         headers: Optional[dict] = None,
         params: Optional[dict] = None,
-    ) -> httpx.Response:
+    ) -> _Response:
         merged = {**self.headers, **(headers or {})}
+        if _HAVE_CURL:
+            return await self._get_curl(url, headers=merged, params=params)
+        return await self._get_httpx(url, headers=merged, params=params)
+
+    async def _get_curl(self, url: str, *, headers: dict, params: Optional[dict]) -> _Response:
+        try:
+            async with _CurlSession(
+                impersonate=CURL_IMPERSONATE,
+                timeout=self.timeout,
+            ) as session:
+                resp = await session.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    allow_redirects=True,
+                )
+        except Exception as e:  # сетевые/TLS ошибки
+            raise ParserError(f"{self.marketplace}: сетевая ошибка: {e}") from e
+
+        if resp.status_code >= 400:
+            raise ParserError(
+                f"{self.marketplace}: HTTP {resp.status_code} от {resp.url}"
+            )
+        return _Response(resp.status_code, resp.text, str(resp.url))
+
+    async def _get_httpx(self, url: str, *, headers: dict, params: Optional[dict]) -> _Response:
         async with httpx.AsyncClient(
             timeout=self.timeout,
-            headers=merged,
+            headers=headers,
             follow_redirects=True,
             http2=False,
         ) as client:
-            resp = await client.get(url, params=params)
+            try:
+                resp = await client.get(url, params=params)
+            except Exception as e:
+                raise ParserError(f"{self.marketplace}: сетевая ошибка: {e}") from e
             if resp.status_code >= 400:
                 raise ParserError(
                     f"{self.marketplace}: HTTP {resp.status_code} от {resp.request.url}"
                 )
-            return resp
+            return _Response(resp.status_code, resp.text, str(resp.request.url))
+
+    async def _get_browser(self, url: str, *, wait_selector: Optional[str] = None) -> _Response:
+        """Получает страницу через Playwright (headless Chromium).
+
+        Используется как фолбэк для сайтов с JS-челленджем. Требует
+        установленного playwright + chromium (`playwright install chromium`).
+        """
+        if not _HAVE_PLAYWRIGHT:
+            raise ParserError(
+                f"{self.marketplace}: Playwright не установлен — "
+                "выполни `pip install playwright && playwright install chromium`"
+            )
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    context = await browser.new_context(
+                        user_agent=DEFAULT_UA,
+                        locale="ru-RU",
+                        viewport={"width": 1920, "height": 1080},
+                        extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9"},
+                    )
+                    page = await context.new_page()
+                    response = await page.goto(url, timeout=int(self.timeout * 1000), wait_until="domcontentloaded")
+                    if wait_selector:
+                        try:
+                            await page.wait_for_selector(wait_selector, timeout=8000)
+                        except Exception:
+                            pass  # селектор не появился — отдадим что есть
+                    html = await page.content()
+                    status = response.status if response else 200
+                    final_url = page.url
+                finally:
+                    await browser.close()
+        except ParserError:
+            raise
+        except Exception as e:
+            raise ParserError(f"{self.marketplace}: Playwright ошибка: {e}") from e
+
+        if status >= 400:
+            raise ParserError(f"{self.marketplace}: Playwright HTTP {status} от {final_url}")
+        return _Response(status, html, final_url)
 
 
 _PRICE_CLEAN_RE = re.compile(r"[^\d.,]")

@@ -50,10 +50,25 @@ class OzonParser(BaseParser):
             if result is not None:
                 return result
 
-        raise ParserError(
-            f"Ozon: {api_err}. HTML карточки также не содержит данных — "
-            "вероятно сработала антибот-защита, попробуйте через Playwright/прокси."
-        )
+        # Финальный фолбэк — Playwright (если установлен)
+        try:
+            browser_resp = await self._get_browser(
+                url,
+                wait_selector='script[type="application/ld+json"], [data-widget="webPrice"]',
+            )
+        except ParserError as pw_err:
+            raise ParserError(
+                f"Ozon: {api_err}. HTML тоже без данных. "
+                f"Playwright недоступен: {pw_err}"
+            ) from pw_err
+
+        jsonld = find_jsonld_product(browser_resp.text)
+        if jsonld:
+            result = self._from_jsonld(jsonld)
+            if result is not None:
+                return result
+
+        raise ParserError(f"Ozon: даже Playwright не нашёл данных товара")
 
     async def _parse_via_api(self, url: str) -> ParsedProduct | None:
         path = urlparse(url).path  # /product/xxx-123456789/
