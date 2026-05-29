@@ -184,9 +184,40 @@ async def test_wb_all_endpoints_fail(monkeypatch):
     async def fake_get(self_, url, **kw):
         raise ParserError("WB: HTTP 404 ...")
 
+    async def fake_browser(self_, url, **kw):
+        raise ParserError("WB: Playwright не установлен")
+
     monkeypatch.setattr(WildberriesParser, "_get", fake_get)
+    monkeypatch.setattr(WildberriesParser, "_get_browser", fake_browser)
     with pytest.raises(ParserError):
         await parser.parse("https://www.wildberries.ru/catalog/100/detail.aspx")
+
+
+@pytest.mark.asyncio
+async def test_wb_browser_fallback_when_api_404(monkeypatch):
+    """Все JSON-эндпоинты дают 404 — парсер должен забрать цену со страницы."""
+    parser = WildberriesParser()
+
+    async def fake_get(self_, url, **kw):
+        raise ParserError("WB: HTTP 404 ...")
+
+    product_html = """
+        <html><body>
+          <h1 class="product-page__title">Наушники беспроводные</h1>
+          <ins class="price-block__final-price">2 499 ₽</ins>
+        </body></html>
+    """
+
+    async def fake_browser(self_, url, **kw):
+        from app.parsers.base import _Response
+        return _Response(200, product_html, url)
+
+    monkeypatch.setattr(WildberriesParser, "_get", fake_get)
+    monkeypatch.setattr(WildberriesParser, "_get_browser", fake_browser)
+    result = await parser.parse("https://www.wildberries.ru/catalog/968907071/detail.aspx")
+    assert result.title == "Наушники беспроводные"
+    assert result.price == Decimal("2499")
+    assert "968907071" in result.image_url
 
 
 # ---------- Ozon ----------

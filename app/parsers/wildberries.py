@@ -1,6 +1,8 @@
 import re
 from decimal import Decimal
 
+from selectolax.parser import HTMLParser
+
 from app.parsers.base import BaseParser, ParserError, to_decimal_price
 from app.schemas import ParsedProduct
 
@@ -43,12 +45,18 @@ class WildberriesParser(BaseParser):
     marketplace = "wb"
 
     # WB периодически меняет путь — пробуем известные варианты по порядку.
+    # detail-эндпоинты идут первыми (канонические), затем list-варианты.
     CARD_ENDPOINTS = (
+        "https://card.wb.ru/cards/v2/detail",
+        "https://card.wb.ru/cards/v4/detail",
+        "https://card.wb.ru/cards/v3/detail",
         "https://card.wb.ru/cards/v2/list",
-        "https://card.wb.ru/cards/v4/list",
         "https://card.wb.ru/cards/v1/detail",
         "https://card.wb.ru/cards/detail",
     )
+
+    # URL карточки товара для браузерного фолбэка
+    PRODUCT_PAGE = "https://www.wildberries.ru/catalog/{sku}/detail.aspx"
 
     headers = {
         **BaseParser.headers,
@@ -90,15 +98,36 @@ class WildberriesParser(BaseParser):
 
     async def parse(self, url: str) -> ParsedProduct:
         sku = self._extract_sku(url)
+
+        # 1. Быстрый путь — JSON API (несколько ротируемых эндпоинтов)
+        product, api_error = await self._fetch_from_api(sku)
+        if product is not None:
+            price = self._extract_price(product)
+            if price is not None:
+                return ParsedProduct(
+                    title=self._build_title(product, sku),
+                    price=price,
+                    image_url=self._image_url(sku),
+                )
+            api_error = ParserError("WB: цена не найдена в ответе API")
+
+        # 2. Фолбэк — рендерим карточку товара в браузере (Playwright)
+        try:
+            return await self._parse_via_browser(sku)
+        except ParserError as browser_err:
+            raise ParserError(
+                f"WB: API не сработал ({api_error}); браузер тоже: {browser_err}"
+            ) from browser_err
+
+    async def _fetch_from_api(self, sku: str) -> tuple[dict | None, Exception | None]:
         params = {
             "appType": "1",
             "curr": "rub",
             "dest": "-1257786",  # Москва (без региона WB иногда отдаёт 400)
+            "spp": "30",
             "nm": sku,
         }
-
         last_error: Exception | None = None
-        product: dict | None = None
         for endpoint in self.CARD_ENDPOINTS:
             try:
                 resp = await self._get(endpoint, params=params)
@@ -112,28 +141,49 @@ class WildberriesParser(BaseParser):
 
             products = (data.get("data") or {}).get("products") or []
             if products:
-                product = products[0]
-                break
+                return products[0], None
             last_error = ParserError(f"WB: товар {sku} не найден ({endpoint})")
+        return None, last_error or ParserError("WB: все эндпоинты вернули ошибку")
 
-        if product is None:
-            raise last_error or ParserError("WB: все эндпоинты вернули ошибку")
+    async def _parse_via_browser(self, sku: str) -> ParsedProduct:
+        page_url = self.PRODUCT_PAGE.format(sku=sku)
+        resp = await self._get_browser(
+            page_url,
+            wait_selector=".price-block__final-price, .price-block__wallet-price",
+        )
+        tree = HTMLParser(resp.text)
 
-        price = self._extract_price(product)
+        price = None
+        for selector in (
+            ".price-block__final-price",
+            "ins.price-block__final-price",
+            ".price-block__wallet-price",
+            '[class*="price-block__final-price"]',
+        ):
+            node = tree.css_first(selector)
+            if node:
+                price = to_decimal_price(node.text())
+                if price is not None and price > 0:
+                    break
         if price is None:
-            raise ParserError("WB: цена не найдена в ответе API")
+            raise ParserError("WB: цена не найдена на странице товара")
 
-        title = (product.get("name") or "").strip() or f"Товар WB {sku}"
-        # Бренд + название читабельнее
-        brand = (product.get("brand") or "").strip()
-        if brand and brand.lower() not in title.lower():
-            title = f"{brand} {title}"
+        title_node = tree.css_first("h1.product-page__title") or tree.css_first("h1")
+        title = title_node.text(strip=True) if title_node else f"Товар WB {sku}"
 
         return ParsedProduct(
             title=title,
             price=price,
             image_url=self._image_url(sku),
         )
+
+    @staticmethod
+    def _build_title(product: dict, sku: str) -> str:
+        title = (product.get("name") or "").strip() or f"Товар WB {sku}"
+        brand = (product.get("brand") or "").strip()
+        if brand and brand.lower() not in title.lower():
+            title = f"{brand} {title}"
+        return title
 
     @staticmethod
     def _extract_price(product: dict) -> Decimal | None:
