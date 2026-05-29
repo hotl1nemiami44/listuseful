@@ -24,15 +24,26 @@ except Exception:  # pragma: no cover - окружения без curl_cffi
 # httpx — резервный путь, если curl_cffi недоступен.
 import httpx
 
-# Playwright — последний фолбэк для сайтов с JS-челленджем (Я.Маркет SmartCaptcha,
-# Ozon антибот). Не требуется для запуска приложения, если не установлен —
-# парсеры просто не смогут использовать браузерный путь.
+# Playwright — резерв на случай отсутствия crawl4ai.
 try:
     from playwright.async_api import async_playwright
     _HAVE_PLAYWRIGHT = True
 except Exception:  # pragma: no cover
     async_playwright = None
     _HAVE_PLAYWRIGHT = False
+
+# crawl4ai — основной браузерный путь. Async-native, stealth-mode + magic-mode +
+# simulate_user из коробки, обходит большинство антиботов на маркетплейсах.
+# Под капотом Playwright, но с правильно настроенным fingerprinting.
+try:
+    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+    _HAVE_CRAWL4AI = True
+except Exception:  # pragma: no cover
+    AsyncWebCrawler = None
+    BrowserConfig = None
+    CrawlerRunConfig = None
+    CacheMode = None
+    _HAVE_CRAWL4AI = False
 
 
 class ParserError(Exception):
@@ -142,16 +153,63 @@ class BaseParser(ABC):
             return _Response(resp.status_code, resp.text, str(resp.request.url))
 
     async def _get_browser(self, url: str, *, wait_selector: Optional[str] = None) -> _Response:
-        """Получает страницу через Playwright (headless Chromium).
+        """Браузерный фолбэк через crawl4ai (или raw Playwright если crawl4ai нет).
 
-        Используется как фолбэк для сайтов с JS-челленджем. Требует
-        установленного playwright + chromium (`playwright install chromium`).
+        crawl4ai даёт stealth-mode, magic-mode и simulate_user из коробки —
+        это пробивает антибот WB/Ozon/Я.Маркета. Требует установки браузера:
+        `crawl4ai-setup` (одна команда поставит и Playwright, и Chromium).
         """
-        if not _HAVE_PLAYWRIGHT:
+        if _HAVE_CRAWL4AI:
+            return await self._get_crawl4ai(url, wait_selector=wait_selector)
+        if _HAVE_PLAYWRIGHT:
+            return await self._get_playwright(url, wait_selector=wait_selector)
+        raise ParserError(
+            f"{self.marketplace}: ни crawl4ai, ни Playwright не установлены — "
+            "выполни `pip install crawl4ai && crawl4ai-setup`"
+        )
+
+    async def _get_crawl4ai(self, url: str, *, wait_selector: Optional[str] = None) -> _Response:
+        browser_cfg = BrowserConfig(
+            headless=True,
+            user_agent=DEFAULT_UA,
+            viewport_width=1920,
+            viewport_height=1080,
+            enable_stealth=True,  # маскировка navigator.webdriver и др.
+            extra_args=["--lang=ru-RU"],
+            verbose=False,
+        )
+        run_cfg = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            wait_until="domcontentloaded",
+            page_timeout=int(self.timeout * 1000),
+            wait_for=f"css:{wait_selector}" if wait_selector else None,
+            wait_for_timeout=8000,
+            simulate_user=True,     # эмуляция движения мыши/скроллов
+            magic=True,             # auto-bypass для популярных антиботов
+            override_navigator=True,
+            remove_overlay_elements=True,
+            locale="ru-RU",
+            verbose=False,
+        )
+        try:
+            async with AsyncWebCrawler(config=browser_cfg) as crawler:
+                result = await crawler.arun(url=url, config=run_cfg)
+        except ParserError:
+            raise
+        except Exception as e:
+            raise ParserError(f"{self.marketplace}: crawl4ai ошибка: {e}") from e
+
+        if not result.success:
             raise ParserError(
-                f"{self.marketplace}: Playwright не установлен — "
-                "выполни `pip install playwright && playwright install chromium`"
+                f"{self.marketplace}: crawl4ai не получил страницу: "
+                f"{getattr(result, 'error_message', 'unknown')}"
             )
+        status = getattr(result, "status_code", 200) or 200
+        if status >= 400:
+            raise ParserError(f"{self.marketplace}: crawl4ai HTTP {status} от {url}")
+        return _Response(status, result.html or "", result.url or url)
+
+    async def _get_playwright(self, url: str, *, wait_selector: Optional[str] = None) -> _Response:
         try:
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(headless=True)
@@ -168,7 +226,7 @@ class BaseParser(ABC):
                         try:
                             await page.wait_for_selector(wait_selector, timeout=8000)
                         except Exception:
-                            pass  # селектор не появился — отдадим что есть
+                            pass
                     html = await page.content()
                     status = response.status if response else 200
                     final_url = page.url

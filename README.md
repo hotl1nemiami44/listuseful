@@ -8,7 +8,7 @@
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-playwright install chromium   # нужно для Я.Маркета и фолбэка Ozon
+crawl4ai-setup             # ставит Chromium + проверяет браузерное окружение
 cp .env.example .env       # вписать TELEGRAM_BOT_TOKEN
 ```
 

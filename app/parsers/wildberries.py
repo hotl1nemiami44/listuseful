@@ -99,7 +99,8 @@ class WildberriesParser(BaseParser):
     async def parse(self, url: str) -> ParsedProduct:
         sku = self._extract_sku(url)
 
-        # 1. Быстрый путь — JSON API (несколько ротируемых эндпоинтов)
+        # API первичен — быстрее и легче. При 404 (а пути регулярно ротируются)
+        # сразу идём в браузер через crawl4ai/Playwright.
         product, api_error = await self._fetch_from_api(sku)
         if product is not None:
             price = self._extract_price(product)
@@ -111,7 +112,6 @@ class WildberriesParser(BaseParser):
                 )
             api_error = ParserError("WB: цена не найдена в ответе API")
 
-        # 2. Фолбэк — рендерим карточку товара в браузере (Playwright)
         try:
             return await self._parse_via_browser(sku)
         except ParserError as browser_err:
