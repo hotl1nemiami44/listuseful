@@ -62,6 +62,45 @@ async def probe_raw_wb(sku: str) -> None:
         print("  curl_cffi: не установлен")
 
 
+def probe_network_identity() -> None:
+    """Показывает реальный исходящий IP и страну — ключевой фактор для WB.
+    WB/Ozon режут зарубежные IP, поэтому если страна не RU — парсеры будут
+    блокироваться независимо от кода."""
+    import os
+    print("\n--- Сеть ---")
+    proxies = {k: os.environ.get(k) for k in
+               ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")}
+    active = {k: v for k, v in proxies.items() if v}
+    print(f"  Системный прокси (env): {active or 'нет'}")
+    try:
+        from app.config import settings
+        print(f"  proxy_url в .env:       {settings.proxy_url or 'нет'}")
+    except Exception:
+        pass
+
+    if not _HAVE_CURL:
+        return
+    try:
+        from curl_cffi import requests as cr
+        from app.parsers.base import _CA_BUNDLE
+        verify = _CA_BUNDLE if _CA_BUNDLE is not None else False
+        r = cr.get("http://ip-api.com/json/?fields=query,country,countryCode,isp",
+                   timeout=15, impersonate="chrome", verify=verify)
+        if r.status_code == 200:
+            d = r.json()
+            flag = "✅ RU" if d.get("countryCode") == "RU" else "❌ НЕ RU"
+            print(f"  Твой IP:   {d.get('query')}")
+            print(f"  Страна:    {d.get('country')} ({d.get('countryCode')})  {flag}")
+            print(f"  Провайдер: {d.get('isp')}")
+            if d.get("countryCode") != "RU":
+                print("  ⚠️  IP не российский — WB/Ozon будут блокировать запросы.")
+                print("      Выключи VPN или укажи российский proxy_url в .env")
+        else:
+            print(f"  Гео-сервис вернул HTTP {r.status_code}")
+    except Exception as e:
+        print(f"  Не удалось определить IP: {type(e).__name__}: {str(e)[:80]}")
+
+
 async def main() -> None:
     print("=" * 60)
     print("ОКРУЖЕНИЕ")
@@ -69,6 +108,8 @@ async def main() -> None:
     print(f"  curl_cffi:  {'есть' if _HAVE_CURL else 'НЕТ'}")
     print(f"  playwright: {'есть' if _HAVE_PLAYWRIGHT else 'НЕТ'}")
     print(f"  crawl4ai:   {'есть' if _HAVE_CRAWL4AI else 'НЕТ'}")
+
+    probe_network_identity()
 
     urls = sys.argv[1:] or DEFAULT_URLS
 

@@ -108,6 +108,15 @@ DEFAULT_UA = (
 CURL_IMPERSONATE = "chrome124"
 
 
+def _proxy() -> Optional[str]:
+    """Прокси из настроек (если задан)."""
+    try:
+        from app.config import settings
+        return settings.proxy_url or None
+    except Exception:
+        return None
+
+
 class _Response:
     """Унифицированный ответ — у curl_cffi и httpx разные API."""
 
@@ -174,6 +183,9 @@ class BaseParser(ABC):
         }
         if impersonate:
             kwargs["impersonate"] = impersonate
+        proxy = _proxy()
+        if proxy:
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
         return _curl_requests.get(url, **kwargs)
 
     async def _get_curl(self, url: str, *, headers: dict, params: Optional[dict]) -> _Response:
@@ -215,6 +227,7 @@ class BaseParser(ABC):
             headers=headers,
             follow_redirects=True,
             http2=False,
+            proxy=_proxy(),
         ) as client:
             try:
                 resp = await client.get(url, params=params)
@@ -250,6 +263,7 @@ class BaseParser(ABC):
             viewport_height=1080,
             enable_stealth=True,  # маскировка navigator.webdriver и др.
             extra_args=["--lang=ru-RU"],
+            proxy=_proxy(),
             verbose=False,
         )
         run_cfg = CrawlerRunConfig(
@@ -287,9 +301,13 @@ class BaseParser(ABC):
         return _Response(status, result.html or "", result.url or url)
 
     async def _get_playwright(self, url: str, *, wait_selector: Optional[str] = None) -> _Response:
+        proxy = _proxy()
+        launch_kwargs = {"headless": True}
+        if proxy:
+            launch_kwargs["proxy"] = {"server": proxy}
         try:
             async with async_playwright() as pw:
-                browser = await pw.chromium.launch(headless=True)
+                browser = await pw.chromium.launch(**launch_kwargs)
                 try:
                     context = await browser.new_context(
                         user_agent=DEFAULT_UA,
