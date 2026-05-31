@@ -7,14 +7,10 @@
 import asyncio
 import sys
 
-# На Windows curl_cffi требует SelectorEventLoopPolicy.
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 # Чтобы скрипт работал из корня репозитория
 sys.path.insert(0, ".")
 
-from app.parsers.base import _HAVE_CURL, _HAVE_PLAYWRIGHT, _HAVE_CRAWL4AI  # noqa: E402
+from app.parsers.base import _HAVE_CURL, _HAVE_PLAYWRIGHT, _HAVE_CRAWL4AI, _CA_BUNDLE  # noqa: E402
 from app.parsers.factory import get_parser  # noqa: E402
 
 DEFAULT_URLS = [
@@ -24,10 +20,20 @@ DEFAULT_URLS = [
     "https://aliexpress.ru/item/1005006172908860.html",
 ]
 
+# Несколько вариантов эндпоинта/региона — покажем, какой отвечает 200
+WB_ENDPOINTS = [
+    ("v2/detail dest=-1257786", "https://card.wb.ru/cards/v2/detail",
+     {"appType": "1", "curr": "rub", "dest": "-1257786", "spp": "30"}),
+    ("v2/detail dest=-1255987", "https://card.wb.ru/cards/v2/detail",
+     {"appType": "1", "curr": "rub", "dest": "-1255987", "spp": "30"}),
+    ("v1/detail", "https://card.wb.ru/cards/detail",
+     {"appType": "1", "curr": "rub", "dest": "-1257786", "nm": ""}),
+]
+
 
 async def probe_raw_wb(sku: str) -> None:
-    """Прямой запрос к WB API — показываем сырой ответ."""
-    print(f"\n--- Сырой запрос WB API (nm={sku}) ---")
+    """Прямые запросы к WB API разными способами — показываем сырой ответ."""
+    print(f"\n--- Сырые запросы WB API (nm={sku}) ---")
     params = {"appType": "1", "curr": "rub", "dest": "-1257786", "spp": "30", "nm": sku}
     url = "https://card.wb.ru/cards/v2/detail"
 
@@ -36,23 +42,22 @@ async def probe_raw_wb(sku: str) -> None:
         import httpx
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
             r = await c.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"})
-            print(f"  httpx:     HTTP {r.status_code}, длина {len(r.text)}")
-            if r.status_code == 200:
-                print(f"             {r.text[:160]}")
+            print(f"  httpx     v2/detail: HTTP {r.status_code}, длина {len(r.text)}")
     except Exception as e:
         print(f"  httpx:     ОШИБКА {type(e).__name__}: {e}")
 
-    # curl_cffi
+    # curl_cffi (синхронный API + фикс CA-пути) — перебираем эндпоинты
     if _HAVE_CURL:
-        try:
-            from curl_cffi.requests import AsyncSession
-            async with AsyncSession(timeout=15, impersonate="chrome") as s:
-                r = await s.get(url, params=params)
-                print(f"  curl_cffi: HTTP {r.status_code}, длина {len(r.text)}")
-                if r.status_code == 200:
-                    print(f"             {r.text[:160]}")
-        except Exception as e:
-            print(f"  curl_cffi: ОШИБКА {type(e).__name__}: {e}")
+        from curl_cffi import requests as cr
+        verify = _CA_BUNDLE if _CA_BUNDLE is not None else False
+        for name, ep, base in WB_ENDPOINTS:
+            p = dict(base, nm=sku)
+            try:
+                r = cr.get(ep, params=p, timeout=15, impersonate="chrome", verify=verify)
+                preview = r.text[:120].replace("\n", " ") if r.status_code == 200 else ""
+                print(f"  curl_cffi {name}: HTTP {r.status_code}, длина {len(r.text)}  {preview}")
+            except Exception as e:
+                print(f"  curl_cffi {name}: ОШИБКА {type(e).__name__}: {str(e)[:80]}")
     else:
         print("  curl_cffi: не установлен")
 

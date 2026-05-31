@@ -1,13 +1,6 @@
-import asyncio
 import logging
 import os
-import sys
 from contextlib import asynccontextmanager
-
-# На Windows curl_cffi требует SelectorEventLoopPolicy
-# (по умолчанию используется ProactorEventLoop, который не поддерживает add_reader).
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.responses import FileResponse, Response

@@ -15,12 +15,15 @@ logger = logging.getLogger(__name__)
 
 # curl_cffi подделывает TLS-fingerprint реального Chrome (JA3/JA4),
 # чем обходит антибот WB/Ozon/Я.Маркета — обычный httpx с его TLS они режут.
-# Импорт ленивый, чтобы тесты не требовали curl_cffi.
+# Используем СИНХРОННЫЙ API в отдельном потоке (asyncio.to_thread): так curl_cffi
+# не трогает event loop и не конфликтует с Playwright на Windows (Proactor),
+# а заодно нет warning'а про add_reader на ProactorEventLoop.
+import asyncio
 try:
-    from curl_cffi.requests import AsyncSession as _CurlSession
+    from curl_cffi import requests as _curl_requests
     _HAVE_CURL = True
 except Exception:  # pragma: no cover - окружения без curl_cffi
-    _CurlSession = None
+    _curl_requests = None
     _HAVE_CURL = False
 
 # httpx — резервный путь, если curl_cffi недоступен.
@@ -160,6 +163,19 @@ class BaseParser(ABC):
             return await self._get_curl(url, headers=merged, params=params)
         return await self._get_httpx(url, headers=merged, params=params)
 
+    def _curl_get_sync(self, url, headers, params, verify, impersonate):
+        """Синхронный запрос curl_cffi (вызывается в отдельном потоке)."""
+        kwargs = {
+            "headers": headers,
+            "params": params,
+            "timeout": self.timeout,
+            "verify": verify,
+            "allow_redirects": True,
+        }
+        if impersonate:
+            kwargs["impersonate"] = impersonate
+        return _curl_requests.get(url, **kwargs)
+
     async def _get_curl(self, url: str, *, headers: dict, params: Optional[dict]) -> _Response:
         # verify: сначала пытаемся с CA-бандлом (безопасно), при ошибке
         # сертификата — без проверки (curl (77) из-за не-ASCII пути на Windows).
@@ -169,14 +185,10 @@ class BaseParser(ABC):
         # impersonate-таргет может отсутствовать в конкретной сборке curl_cffi —
         # пробуем настроенный, затем дефолтный "chrome", затем без impersonate.
         for target in (CURL_IMPERSONATE, "chrome", None):
-            kwargs: dict = {"timeout": self.timeout, "verify": verify}
-            if target:
-                kwargs["impersonate"] = target
             try:
-                async with _CurlSession(**kwargs) as session:
-                    resp = await session.get(
-                        url, headers=headers, params=params, allow_redirects=True
-                    )
+                resp = await asyncio.to_thread(
+                    self._curl_get_sync, url, headers, params, verify, target
+                )
             except Exception as e:
                 last_exc = e
                 msg = str(e).lower()
