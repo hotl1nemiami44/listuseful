@@ -20,14 +20,18 @@ DEFAULT_URLS = [
     "https://aliexpress.ru/item/1005006172908860.html",
 ]
 
-# Несколько вариантов эндпоинта/региона — покажем, какой отвечает 200
+# Несколько вариантов эндпоинта/хоста — покажем, какой отвечает 200
 WB_ENDPOINTS = [
-    ("v2/detail dest=-1257786", "https://card.wb.ru/cards/v2/detail",
-     {"appType": "1", "curr": "rub", "dest": "-1257786", "spp": "30"}),
-    ("v2/detail dest=-1255987", "https://card.wb.ru/cards/v2/detail",
-     {"appType": "1", "curr": "rub", "dest": "-1255987", "spp": "30"}),
-    ("v1/detail", "https://card.wb.ru/cards/detail",
-     {"appType": "1", "curr": "rub", "dest": "-1257786", "nm": ""}),
+    ("card.wb.ru   v2/detail min", "https://card.wb.ru/cards/v2/detail",
+     {"appType": "1", "curr": "rub", "dest": "-1257786"}),
+    ("u-card.wb.ru v2/detail min", "https://u-card.wb.ru/cards/v2/detail",
+     {"appType": "1", "curr": "rub", "dest": "-1257786"}),
+    ("card.wb.ru   v1/detail",     "https://card.wb.ru/cards/detail",
+     {"appType": "1", "curr": "rub", "dest": "-1257786"}),
+    ("u-card.wb.ru v1/detail",     "https://u-card.wb.ru/cards/detail",
+     {"appType": "1", "curr": "rub", "dest": "-1257786"}),
+    ("card.wb.ru   v2/list min",   "https://card.wb.ru/cards/v2/list",
+     {"appType": "1", "curr": "rub", "dest": "-1257786"}),
 ]
 
 
@@ -54,10 +58,29 @@ async def probe_raw_wb(sku: str) -> None:
             p = dict(base, nm=sku)
             try:
                 r = cr.get(ep, params=p, timeout=15, impersonate="chrome", verify=verify)
+                server = r.headers.get("server") or r.headers.get("Server") or "?"
                 preview = r.text[:120].replace("\n", " ") if r.status_code == 200 else ""
-                print(f"  curl_cffi {name}: HTTP {r.status_code}, длина {len(r.text)}  {preview}")
+                print(f"  {name}: HTTP {r.status_code} [server={server}] длина={len(r.text)} {preview}")
             except Exception as e:
-                print(f"  curl_cffi {name}: ОШИБКА {type(e).__name__}: {str(e)[:80]}")
+                print(f"  {name}: ОШИБКА {type(e).__name__}: {str(e)[:80]}")
+
+    # Дополнительно: статический CDN — должен быть доступен ВСЕГДА (без антибота)
+    print("\n--- WB CDN (basket-NN.wbbasket.ru, статика) ---")
+    if _HAVE_CURL:
+        from curl_cffi import requests as cr
+        from app.parsers.base import _CA_BUNDLE
+        from app.parsers.wildberries import WildberriesParser
+        verify = _CA_BUNDLE if _CA_BUNDLE is not None else False
+        basket = WildberriesParser._basket(sku)
+        vol = int(sku) // 100_000
+        part = int(sku) // 1000
+        url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{sku}/info/ru/card.json"
+        try:
+            r = cr.get(url, timeout=15, impersonate="chrome", verify=verify)
+            preview = r.text[:120].replace("\n", " ") if r.status_code == 200 else ""
+            print(f"  basket-{basket} card.json: HTTP {r.status_code}  длина={len(r.text)}  {preview}")
+        except Exception as e:
+            print(f"  basket card.json: ОШИБКА {type(e).__name__}: {str(e)[:80]}")
     else:
         print("  curl_cffi: не установлен")
 

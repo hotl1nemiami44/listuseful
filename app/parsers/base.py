@@ -136,7 +136,8 @@ class _Response:
 
 class BaseParser(ABC):
     marketplace: str = ""
-    timeout: float = 25.0
+    # 45s — с запасом на JS-челлендж WB/Ozon в браузерном фолбэке
+    timeout: float = 45.0
 
     headers: dict = {
         "User-Agent": DEFAULT_UA,
@@ -268,12 +269,12 @@ class BaseParser(ABC):
         )
         run_cfg = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,
-            wait_until="domcontentloaded",
+            # networkidle даёт JS-челленджу WB/Ozon время добежать до конца.
+            wait_until="networkidle",
             page_timeout=int(self.timeout * 1000),
-            # Если селектор задан — ждём его; иначе даём JS-рендеру время.
             wait_for=f"css:{wait_selector}" if wait_selector else None,
-            wait_for_timeout=8000,
-            delay_before_return_html=0.5 if wait_selector else 3.5,
+            wait_for_timeout=15000,
+            delay_before_return_html=5.0,
             simulate_user=True,     # эмуляция движения мыши/скроллов
             magic=True,             # auto-bypass для популярных антиботов
             override_navigator=True,

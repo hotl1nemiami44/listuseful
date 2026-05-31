@@ -57,10 +57,13 @@ _BASKET_BOUNDS = [
 class WildberriesParser(BaseParser):
     marketplace = "wb"
 
-    # Канонический эндпоинт WB. v2/detail — основной рабочий путь;
-    # v2/list — синоним для нескольких nm (работает и для одного).
+    # Канонические JSON-API эндпоинты. WB шардит по хостам, поэтому пробуем
+    # несколько: card.wb.ru → u-card (зеркало) → basket-NN (статический CDN).
     CARD_ENDPOINTS = (
         "https://card.wb.ru/cards/v2/detail",
+        "https://u-card.wb.ru/cards/v2/detail",
+        "https://card.wb.ru/cards/v1/detail",
+        "https://u-card.wb.ru/cards/v1/detail",
         "https://card.wb.ru/cards/v2/list",
     )
 
@@ -129,29 +132,28 @@ class WildberriesParser(BaseParser):
             ) from browser_err
 
     async def _fetch_from_api(self, sku: str) -> tuple[dict | None, Exception | None]:
-        params = {
-            "appType": "1",
-            "curr": "rub",
-            "dest": "-1257786",  # Москва (без региона WB иногда отдаёт 400)
-            "spp": "30",
-            "nm": sku,
-        }
+        # Минимальный набор параметров — некоторые шарды возвращают 404 при наличии
+        # лишних (spp, ab_testing). Если базовый набор не сработает — попробуем
+        # расширенный.
+        base_params = {"appType": "1", "curr": "rub", "dest": "-1257786", "nm": sku}
+        extended = dict(base_params, spp="30")
         last_error: Exception | None = None
         for endpoint in self.CARD_ENDPOINTS:
-            try:
-                resp = await self._get(endpoint, params=params)
-                data = resp.json()
-            except ParserError as e:
-                last_error = e
-                continue
-            except Exception as e:
-                last_error = ParserError(f"WB: ошибка запроса {endpoint}: {e}")
-                continue
+            for params in (base_params, extended):
+                try:
+                    resp = await self._get(endpoint, params=params)
+                    data = resp.json()
+                except ParserError as e:
+                    last_error = e
+                    continue
+                except Exception as e:
+                    last_error = ParserError(f"WB: ошибка запроса {endpoint}: {e}")
+                    continue
 
-            products = (data.get("data") or {}).get("products") or []
-            if products:
-                return products[0], None
-            last_error = ParserError(f"WB: товар {sku} не найден ({endpoint})")
+                products = (data.get("data") or {}).get("products") or []
+                if products:
+                    return products[0], None
+                last_error = ParserError(f"WB: товар {sku} не найден ({endpoint})")
         return None, last_error or ParserError("WB: все эндпоинты вернули ошибку")
 
     async def _parse_via_browser(self, sku: str) -> ParsedProduct:

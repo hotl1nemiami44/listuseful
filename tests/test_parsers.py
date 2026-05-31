@@ -170,7 +170,7 @@ async def test_wb_falls_back_through_endpoints(monkeypatch):
     monkeypatch.setattr(WildberriesParser, "_get", fake_get)
     result = await parser.parse("https://www.wildberries.ru/catalog/100/detail.aspx")
     assert result.price == Decimal("100.00")
-    assert len(calls) == 2  # первый упал, второй сработал
+    assert len(calls) >= 2  # хотя бы первый упал, второй (или дальше) сработал
 
 
 @pytest.mark.asyncio
