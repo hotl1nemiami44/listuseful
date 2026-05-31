@@ -92,10 +92,12 @@ def test_wb_basket_mapping():
     assert WildberriesParser._basket("100") == "01"
     # vol = 200 → basket 02
     assert WildberriesParser._basket("20000000") == "02"
-    # vol = 5000 → старшая корзина
+    # vol = 5000 → basket 27 (5000 <= 5189)
     assert WildberriesParser._basket("500000000") == "27"
+    # vol = 9689 (реальный высокий артикул) → basket 36
+    assert WildberriesParser._basket("968907071") == "36"
     # vol сверху — последняя корзина
-    assert WildberriesParser._basket("999999999999") == "28"
+    assert WildberriesParser._basket("999999999999") == "40"
 
 
 def test_wb_image_url():
@@ -151,7 +153,7 @@ async def test_wb_parse_full(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_wb_falls_back_through_endpoints(monkeypatch):
-    """Первый эндпоинт даёт 404 — парсер должен попробовать следующий."""
+    """Первый эндпоинт даёт ошибку — парсер должен попробовать следующий."""
     parser = WildberriesParser()
     calls = []
 
@@ -163,18 +165,12 @@ async def test_wb_falls_back_through_endpoints(monkeypatch):
         calls.append(url)
         if url == WildberriesParser.CARD_ENDPOINTS[0]:
             raise ParserError("WB: HTTP 404 ...")
-        if url == WildberriesParser.CARD_ENDPOINTS[1]:
-            # эндпоинт ответил, но товара нет
-            class Empty:
-                def json(self_inner):
-                    return {"data": {"products": []}}
-            return Empty()
         return GoodResp()
 
     monkeypatch.setattr(WildberriesParser, "_get", fake_get)
     result = await parser.parse("https://www.wildberries.ru/catalog/100/detail.aspx")
     assert result.price == Decimal("100.00")
-    assert len(calls) >= 3  # дошли до третьего эндпоинта
+    assert len(calls) == 2  # первый упал, второй сработал
 
 
 @pytest.mark.asyncio

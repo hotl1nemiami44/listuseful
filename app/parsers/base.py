@@ -115,25 +115,32 @@ class BaseParser(ABC):
         return await self._get_httpx(url, headers=merged, params=params)
 
     async def _get_curl(self, url: str, *, headers: dict, params: Optional[dict]) -> _Response:
-        try:
-            async with _CurlSession(
-                impersonate=CURL_IMPERSONATE,
-                timeout=self.timeout,
-            ) as session:
-                resp = await session.get(
-                    url,
-                    headers=headers,
-                    params=params,
-                    allow_redirects=True,
-                )
-        except Exception as e:  # сетевые/TLS ошибки
-            raise ParserError(f"{self.marketplace}: сетевая ошибка: {e}") from e
+        # impersonate-таргет может отсутствовать в конкретной сборке curl_cffi —
+        # пробуем настроенный, затем дефолтный "chrome", затем без impersonate.
+        for target in (CURL_IMPERSONATE, "chrome", None):
+            kwargs = {"timeout": self.timeout}
+            if target:
+                kwargs["impersonate"] = target
+            try:
+                async with _CurlSession(**kwargs) as session:
+                    resp = await session.get(
+                        url, headers=headers, params=params, allow_redirects=True
+                    )
+            except (ValueError, RuntimeError) as e:
+                # обычно "impersonate target not found" — пробуем следующий
+                if target is None:
+                    raise ParserError(f"{self.marketplace}: curl_cffi: {e}") from e
+                continue
+            except Exception as e:
+                raise ParserError(f"{self.marketplace}: сетевая ошибка: {e}") from e
 
-        if resp.status_code >= 400:
-            raise ParserError(
-                f"{self.marketplace}: HTTP {resp.status_code} от {resp.url}"
-            )
-        return _Response(resp.status_code, resp.text, str(resp.url))
+            if resp.status_code >= 400:
+                raise ParserError(
+                    f"{self.marketplace}: HTTP {resp.status_code} от {resp.url}"
+                )
+            return _Response(resp.status_code, resp.text, str(resp.url))
+        # сюда не доходим, но для типизации
+        raise ParserError(f"{self.marketplace}: curl_cffi не смог выполнить запрос")
 
     async def _get_httpx(self, url: str, *, headers: dict, params: Optional[dict]) -> _Response:
         async with httpx.AsyncClient(

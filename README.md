@@ -8,11 +8,30 @@
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-crawl4ai-setup             # ставит Chromium + проверяет браузерное окружение
 cp .env.example .env       # вписать TELEGRAM_BOT_TOKEN
 ```
 
 Токен получить у [@BotFather](https://t.me/BotFather).
+
+### Браузерный фолбэк (опционально)
+
+WB работает через свой JSON API без браузера. Для сайтов с тяжёлым
+антиботом (Я.Маркет, иногда Ozon) можно доустановить браузер:
+
+```bash
+pip install -r requirements-browser.txt
+playwright install chromium
+```
+
+## Диагностика
+
+Если парсер не работает — запусти и пришли вывод:
+
+```bash
+python scripts/diagnose.py
+# или для конкретного товара:
+python scripts/diagnose.py https://www.wildberries.ru/catalog/968907071/detail.aspx
+```
 
 ## Запуск
 

@@ -7,8 +7,9 @@ from app.parsers.base import BaseParser, ParserError, to_decimal_price
 from app.schemas import ParsedProduct
 
 
-# Пороги diапазонов корзин WB (vol = nm // 100_000).
+# Пороги диапазонов корзин WB (vol = nm // 100_000).
 # Если nm выше последнего порога — используется последняя корзина.
+# Актуально на 2025: корзины доросли до basket-40+.
 _BASKET_BOUNDS = [
     (143, "01"),
     (287, "02"),
@@ -38,21 +39,29 @@ _BASKET_BOUNDS = [
     (4877, "26"),
     (5189, "27"),
     (5501, "28"),
+    (5813, "29"),
+    (6125, "30"),
+    (6437, "31"),
+    (6749, "32"),
+    (7061, "33"),
+    (7665, "34"),
+    (8669, "35"),
+    (10889, "36"),
+    (13243, "37"),
+    (15990, "38"),
+    (17990, "39"),
+    (100000, "40"),
 ]
 
 
 class WildberriesParser(BaseParser):
     marketplace = "wb"
 
-    # WB периодически меняет путь — пробуем известные варианты по порядку.
-    # detail-эндпоинты идут первыми (канонические), затем list-варианты.
+    # Канонический эндпоинт WB. v2/detail — основной рабочий путь;
+    # v2/list — синоним для нескольких nm (работает и для одного).
     CARD_ENDPOINTS = (
         "https://card.wb.ru/cards/v2/detail",
-        "https://card.wb.ru/cards/v4/detail",
-        "https://card.wb.ru/cards/v3/detail",
         "https://card.wb.ru/cards/v2/list",
-        "https://card.wb.ru/cards/v1/detail",
-        "https://card.wb.ru/cards/detail",
     )
 
     # URL карточки товара для браузерного фолбэка

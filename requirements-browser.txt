@@ -1,0 +1,9 @@
+# Опциональные браузерные движки для обхода тяжёлого антибота (Я.Маркет, Ozon).
+# Ставить ТОЛЬКО при необходимости — на Windows тянут Chromium (~150 МБ).
+#
+#   pip install -r requirements-browser.txt
+#   playwright install chromium
+#
+# Парсеры работают и без них (через httpx/curl_cffi); браузер — последний фолбэк.
+
+playwright>=1.49
