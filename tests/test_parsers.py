@@ -216,6 +216,38 @@ async def test_wb_browser_fallback_when_api_404(monkeypatch):
     assert "968907071" in result.image_url
 
 
+@pytest.mark.asyncio
+async def test_wb_cdn_price_history_fallback(monkeypatch):
+    """API недоступен (антибот), но статический CDN отдаёт price-history.json —
+    парсер должен собрать товар из CDN: имя из card.json, цена из истории."""
+    from app.parsers.base import _Response
+    from app.parsers import wildberries as wb_mod
+
+    wb_mod._BASKET_CACHE.clear()  # чтобы не зависеть от других тестов
+    parser = WildberriesParser()
+
+    async def fake_get(self_, url, **kw):
+        if "price-history.json" in url:
+            return _Response(200, "", url, json_data=[
+                {"dt": 1, "price": {"RUB": 250000}},
+                {"dt": 2, "price": {"RUB": 240000}},  # последняя = текущая
+            ])
+        if "card.json" in url:
+            return _Response(200, '{"imt_name":"Кофе в зернах 1 кг Арабика"}', url)
+        # API-эндпоинты (card.wb.ru / u-card / search) — заблокированы
+        raise ParserError("WB: HTTP 404 ...")
+
+    async def fake_browser(self_, url, **kw):
+        raise AssertionError("браузер не должен вызываться — CDN дал цену")
+
+    monkeypatch.setattr(WildberriesParser, "_get", fake_get)
+    monkeypatch.setattr(WildberriesParser, "_get_browser", fake_browser)
+    result = await parser.parse("https://www.wildberries.ru/catalog/968907071/detail.aspx")
+    assert result.title == "Кофе в зернах 1 кг Арабика"
+    assert result.price == Decimal("2400.00")
+    assert "968907071" in result.image_url
+
+
 # ---------- Ozon ----------
 
 def test_ozon_price_from_widget_card():

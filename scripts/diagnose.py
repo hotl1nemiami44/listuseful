@@ -181,6 +181,24 @@ async def probe_raw_wb(sku: str) -> None:
         if not found:
             print("  ❌ Ни одна корзина (1..50) не отдала 200")
             print("     → сетевая фильтрация режет *.wbbasket.ru, либо артикул удалён")
+        else:
+            # Ключевой тест: price-history.json на той же корзине — цена без антибота
+            ph_url = (f"https://basket-{found}.wbbasket.ru"
+                      f"/vol{vol}/part{part}/{sku}/info/price-history.json")
+            try:
+                r = cr.get(ph_url, timeout=8, impersonate="chrome", verify=verify)
+                if r.status_code == 200:
+                    hist = r.json()
+                    last = hist[-1] if isinstance(hist, list) and hist else None
+                    rub = (last or {}).get("price", {}).get("RUB") if last else None
+                    print(f"  ✅ price-history.json: HTTP 200, записей={len(hist)}")
+                    if rub is not None:
+                        print(f"      последняя цена: {rub} (коп.) = {rub/100:.2f} ₽")
+                else:
+                    print(f"  ⚠️  price-history.json: HTTP {r.status_code} "
+                          "(у товара может не быть истории цен)")
+            except Exception as e:
+                print(f"  price-history.json: ОШИБКА {type(e).__name__}: {str(e)[:60]}")
 
 
 def probe_network_identity() -> None:

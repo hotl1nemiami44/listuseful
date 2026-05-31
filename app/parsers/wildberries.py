@@ -151,11 +151,66 @@ class WildberriesParser(BaseParser):
             pass
         return None
 
+    @classmethod
+    async def _fetch_cdn_price(cls, sku: str) -> Decimal | None:
+        """Берёт актуальную цену из price-history.json на статическом CDN.
+        Последняя запись истории = текущая цена. Это единственный источник цены,
+        который не закрыт антиботом WB (card.wb.ru/браузер отдают 404/498), —
+        цена может отставать от живой на часы, но для трекера этого достаточно."""
+        sku_int = int(sku)
+        vol = sku_int // 100_000
+        part = sku_int // 1000
+        basket = await cls._basket_async(sku)
+        if not basket:
+            return None
+        url = (
+            f"https://basket-{basket}.wbbasket.ru"
+            f"/vol{vol}/part{part}/{sku}/info/price-history.json"
+        )
+        parser = cls()
+        try:
+            resp = await parser._get(url)
+            if resp.status_code != 200:
+                return None
+            history = resp.json()
+        except Exception:
+            return None
+        if not isinstance(history, list) or not history:
+            return None
+        # Берём последнюю запись с валидной ценой (история отсортирована по дате)
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            price_block = entry.get("price")
+            if isinstance(price_block, dict):
+                rub = price_block.get("RUB")
+                if rub:
+                    return Decimal(str(rub)) / 100
+        return None
+
+    async def _parse_via_cdn(self, sku: str) -> ParsedProduct | None:
+        """Собирает товар целиком из статического CDN: имя из card.json,
+        цена из price-history.json. Работает, когда API и браузер заблокированы."""
+        price = await self._fetch_cdn_price(sku)
+        if price is None or price <= 0:
+            return None
+        card = await self._fetch_cdn_card(sku)
+        title = f"Товар WB {sku}"
+        if card:
+            name = (card.get("imt_name") or "").strip()
+            if name:
+                title = name
+        return ParsedProduct(
+            title=title,
+            price=price,
+            image_url=await self._image_url_verified(sku),
+        )
+
     async def parse(self, url: str) -> ParsedProduct:
         sku = self._extract_sku(url)
 
-        # API первичен — быстрее и легче. При 404 (а пути регулярно ротируются)
-        # сразу идём в браузер через crawl4ai/Playwright.
+        # API первичен — самый свежий прайс. При 404 (пути ротируются) и при
+        # антиботе (498) идём дальше.
         product, api_error = await self._fetch_from_api(sku)
         if product is not None:
             price = self._extract_price(product)
@@ -167,18 +222,26 @@ class WildberriesParser(BaseParser):
                 )
             api_error = ParserError("WB: цена не найдена в ответе API")
 
+        # CDN-путь: цена из price-history.json + имя из card.json. Статика без
+        # антибота — работает, когда card.wb.ru отдаёт 404, а браузер ловит 498.
+        # Быстрее и надёжнее браузера, поэтому пробуем до него.
+        cdn_product = await self._parse_via_cdn(sku)
+        if cdn_product is not None:
+            return cdn_product
+
+        # Последний шанс — браузер (для товаров без price-history на CDN).
         try:
             return await self._parse_via_browser(sku)
         except ParserError as browser_err:
-            # Финальный fallback: CDN-карточка отдаёт имя без антибота.
-            # Без цены полный ParsedProduct собрать нельзя, но в сообщение об ошибке
-            # положим имя — это сильно поможет пользователю понять, что произошло.
             cdn_card = await self._fetch_cdn_card(sku)
             name_hint = ""
             if cdn_card:
                 name = (cdn_card.get("imt_name") or "").strip()
                 if name:
-                    name_hint = f' Товар найден в CDN: "{name}", но цена недоступна.'
+                    name_hint = (
+                        f' Товар найден в CDN: "{name}", но цена недоступна '
+                        "(нет price-history.json)."
+                    )
             raise ParserError(
                 f"WB: API не сработал ({api_error}); браузер тоже: {browser_err}.{name_hint}"
             ) from browser_err
