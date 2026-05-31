@@ -7,58 +7,29 @@ from app.parsers.base import BaseParser, ParserError, to_decimal_price
 from app.schemas import ParsedProduct
 
 
-# Пороги диапазонов корзин WB (vol = nm // 100_000).
-# Если nm выше последнего порога — используется последняя корзина.
-# Актуально на 2025: корзины доросли до basket-40+.
-_BASKET_BOUNDS = [
-    (143, "01"),
-    (287, "02"),
-    (431, "03"),
-    (719, "04"),
-    (1007, "05"),
-    (1061, "06"),
-    (1115, "07"),
-    (1169, "08"),
-    (1313, "09"),
-    (1601, "10"),
-    (1655, "11"),
-    (1919, "12"),
-    (2045, "13"),
-    (2189, "14"),
-    (2405, "15"),
-    (2621, "16"),
-    (2837, "17"),
-    (3053, "18"),
-    (3269, "19"),
-    (3485, "20"),
-    (3701, "21"),
-    (3917, "22"),
-    (4133, "23"),
-    (4349, "24"),
-    (4565, "25"),
-    (4877, "26"),
-    (5189, "27"),
-    (5501, "28"),
-    (5813, "29"),
-    (6125, "30"),
-    (6437, "31"),
-    (6749, "32"),
-    (7061, "33"),
-    (7665, "34"),
-    (8669, "35"),
-    (10889, "36"),
-    (13243, "37"),
-    (15990, "38"),
-    (17990, "39"),
-    (100000, "40"),
+# Кэш найденных корзин: vol → "NN".
+# WB меняет распределение по корзинам, поэтому жёсткой таблице доверять нельзя:
+# определяем корзину пробой статического CDN и кэшируем результат до перезапуска.
+_BASKET_CACHE: dict[int, str] = {}
+
+# Стартовое приближение (актуально на 2024–2025). Если не сработает —
+# пройдём по диапазону basket-01..basket-50, начиная отсюда.
+_BASKET_HINT_BOUNDS = [
+    (143, 1), (287, 2), (431, 3), (719, 4), (1007, 5), (1061, 6), (1115, 7),
+    (1169, 8), (1313, 9), (1601, 10), (1655, 11), (1919, 12), (2045, 13),
+    (2189, 14), (2405, 15), (2621, 16), (2837, 17), (3053, 18), (3269, 19),
+    (3485, 20), (3701, 21), (3917, 22), (4133, 23), (4349, 24), (4565, 25),
+    (4877, 26), (5189, 27), (5501, 28), (5813, 29), (6125, 30), (6437, 31),
+    (6749, 32), (7061, 33), (7665, 34), (8669, 35), (10889, 36), (13243, 37),
+    (15990, 38), (17990, 39), (100000, 40),
 ]
 
 
 class WildberriesParser(BaseParser):
     marketplace = "wb"
 
-    # Канонические JSON-API эндпоинты. WB шардит по хостам, поэтому пробуем
-    # несколько: card.wb.ru → u-card (зеркало) → basket-NN (статический CDN).
+    # Все известные пути карточки WB. card.wb.ru — основной; u-card — зеркало;
+    # search.wb.ru/exactmatch — поисковый эндпоинт, иногда работает там, где card.wb.ru закрыт.
     CARD_ENDPOINTS = (
         "https://card.wb.ru/cards/v2/detail",
         "https://u-card.wb.ru/cards/v2/detail",
@@ -66,6 +37,8 @@ class WildberriesParser(BaseParser):
         "https://u-card.wb.ru/cards/v1/detail",
         "https://card.wb.ru/cards/v2/list",
     )
+    # Поисковый эндпоинт (работает по text query — кидаем туда сам артикул)
+    SEARCH_ENDPOINT = "https://search.wb.ru/exactmatch/ru/common/v5/search"
 
     # URL карточки товара для браузерного фолбэка
     PRODUCT_PAGE = "https://www.wildberries.ru/catalog/{sku}/detail.aspx"
@@ -94,11 +67,51 @@ class WildberriesParser(BaseParser):
 
     @staticmethod
     def _basket(sku: str) -> str:
+        """Синхронная оценка корзины по таблице — для случаев, когда некогда зондировать.
+        Возвращает приблизительное значение; для точного результата используется
+        _basket_async, который пробует CDN и кэширует найденную корзину."""
         vol = int(sku) // 100_000
-        for upper, basket in _BASKET_BOUNDS:
+        if vol in _BASKET_CACHE:
+            return _BASKET_CACHE[vol]
+        for upper, basket_num in _BASKET_HINT_BOUNDS:
             if vol <= upper:
-                return basket
-        return _BASKET_BOUNDS[-1][1]
+                return f"{basket_num:02d}"
+        return f"{_BASKET_HINT_BOUNDS[-1][1]:02d}"
+
+    @classmethod
+    async def _basket_async(cls, sku: str) -> str | None:
+        """Находит реальную корзину пробой статического CDN.
+        Сначала пробует подсказку из таблицы, потом расширяет диапазон.
+        Кэширует результат, чтобы не пинговать CDN повторно."""
+        sku_int = int(sku)
+        vol = sku_int // 100_000
+        if vol in _BASKET_CACHE:
+            return _BASKET_CACHE[vol]
+
+        part = sku_int // 1000
+        hint = int(cls._basket(sku))
+        # Поиск: сначала подсказка, потом по всему диапазону 1..50.
+        # Чаще всего корзина либо равна подсказке, либо в ±5 от неё.
+        order = [hint] + [n for n in range(max(1, hint - 5), hint + 6) if n != hint]
+        order += [n for n in range(1, 51) if n not in order]
+
+        parser = cls()
+        for n in order:
+            basket = f"{n:02d}"
+            url = (
+                f"https://basket-{basket}.wbbasket.ru"
+                f"/vol{vol}/part{part}/{sku}/info/ru/card.json"
+            )
+            try:
+                resp = await parser._get(url)
+                if resp.status_code == 200 and resp.text.strip().startswith("{"):
+                    _BASKET_CACHE[vol] = basket
+                    return basket
+            except ParserError:
+                continue
+            except Exception:
+                continue
+        return None
 
     @classmethod
     def _image_url(cls, sku: str) -> str:
@@ -107,6 +120,38 @@ class WildberriesParser(BaseParser):
         part = sku_int // 1000
         basket = cls._basket(sku)
         return f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{sku}/images/big/1.webp"
+
+    @classmethod
+    async def _image_url_verified(cls, sku: str) -> str:
+        """То же что _image_url, но с предварительным поиском корзины через CDN."""
+        sku_int = int(sku)
+        vol = sku_int // 100_000
+        part = sku_int // 1000
+        basket = await cls._basket_async(sku) or cls._basket(sku)
+        return f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{sku}/images/big/1.webp"
+
+    @classmethod
+    async def _fetch_cdn_card(cls, sku: str) -> dict | None:
+        """Достаёт карточку товара (имя, описание) из статического CDN.
+        Цены здесь нет, но имя есть и доступно даже когда card.wb.ru заблокирован."""
+        sku_int = int(sku)
+        vol = sku_int // 100_000
+        part = sku_int // 1000
+        basket = await cls._basket_async(sku)
+        if not basket:
+            return None
+        url = (
+            f"https://basket-{basket}.wbbasket.ru"
+            f"/vol{vol}/part{part}/{sku}/info/ru/card.json"
+        )
+        parser = cls()
+        try:
+            resp = await parser._get(url)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return None
 
     async def parse(self, url: str) -> ParsedProduct:
         sku = self._extract_sku(url)
@@ -120,15 +165,24 @@ class WildberriesParser(BaseParser):
                 return ParsedProduct(
                     title=self._build_title(product, sku),
                     price=price,
-                    image_url=self._image_url(sku),
+                    image_url=await self._image_url_verified(sku),
                 )
             api_error = ParserError("WB: цена не найдена в ответе API")
 
         try:
             return await self._parse_via_browser(sku)
         except ParserError as browser_err:
+            # Финальный fallback: CDN-карточка отдаёт имя без антибота.
+            # Без цены полный ParsedProduct собрать нельзя, но в сообщение об ошибке
+            # положим имя — это сильно поможет пользователю понять, что произошло.
+            cdn_card = await self._fetch_cdn_card(sku)
+            name_hint = ""
+            if cdn_card:
+                name = (cdn_card.get("imt_name") or "").strip()
+                if name:
+                    name_hint = f' Товар найден в CDN: "{name}", но цена недоступна.'
             raise ParserError(
-                f"WB: API не сработал ({api_error}); браузер тоже: {browser_err}"
+                f"WB: API не сработал ({api_error}); браузер тоже: {browser_err}.{name_hint}"
             ) from browser_err
 
     async def _fetch_from_api(self, sku: str) -> tuple[dict | None, Exception | None]:
@@ -154,6 +208,28 @@ class WildberriesParser(BaseParser):
                 if products:
                     return products[0], None
                 last_error = ParserError(f"WB: товар {sku} не найден ({endpoint})")
+
+        # Финальная попытка: search.wb.ru — другой хост, иногда проходит
+        # когда card.wb.ru закрыт сетевыми фильтрами. Ищем по самому артикулу.
+        try:
+            resp = await self._get(self.SEARCH_ENDPOINT, params={
+                "appType": "1", "curr": "rub", "dest": "-1257786",
+                "query": sku, "resultset": "catalog",
+            })
+            data = resp.json()
+            products = (data.get("data") or {}).get("products") or []
+            for p in products:
+                if str(p.get("id")) == sku:
+                    return p, None
+            if products:
+                last_error = ParserError(
+                    f"WB: search.wb.ru вернул {len(products)} товаров, но среди них нет {sku}"
+                )
+        except ParserError as e:
+            last_error = e
+        except Exception as e:
+            last_error = ParserError(f"WB: ошибка search.wb.ru: {e}")
+
         return None, last_error or ParserError("WB: все эндпоинты вернули ошибку")
 
     async def _parse_via_browser(self, sku: str) -> ParsedProduct:

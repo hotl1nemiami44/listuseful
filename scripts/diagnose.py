@@ -35,6 +35,66 @@ WB_ENDPOINTS = [
 ]
 
 
+def probe_dns_and_cert() -> None:
+    """Проверяет DNS + TLS-сертификат для основных доменов WB.
+    Если у пользователя стоит антивирус с HTTPS-перехватом или провайдер
+    режет домен через DPI/DNS-spoofing — это сразу будет видно: либо
+    сертификат не валидируется (CERT_VERIFY_FAILED), либо его эмитент
+    окажется чем-то типа 'Kaspersky' / 'ESET' вместо реального CA."""
+    import socket
+    import ssl
+    print("\n--- DNS + TLS сертификаты ---")
+    hosts = ["card.wb.ru", "u-card.wb.ru", "basket-41.wbbasket.ru", "search.wb.ru"]
+    for host in hosts:
+        try:
+            ip = socket.gethostbyname(host)
+        except Exception as e:
+            print(f"  {host:30s} DNS ОШИБКА: {type(e).__name__}: {e}")
+            continue
+        # Сначала проверяем с полной валидацией. Если перехвата нет — здесь же
+        # достаём issuer (валидный dict только при CERT_REQUIRED).
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((host, 443), timeout=10) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                    cert = ssock.getpeercert()
+                    issuer = dict(x[0] for x in cert.get("issuer", []))
+                    issuer_str = (
+                        issuer.get("commonName")
+                        or issuer.get("organizationName")
+                        or "?"
+                    )
+                    print(f"  {host:30s} IP={ip:15s} ✅ TLS OK  CA: {issuer_str}")
+        except ssl.SSLCertVerificationError as e:
+            # Это самый громкий сигнал: сертификат не валидируется системным CA.
+            # 99% случаев — антивирус с HTTPS-перехватом или DPI/спуфинг.
+            print(f"  {host:30s} IP={ip:15s} ❌ MITM/перехват: {str(e)[:100]}")
+            # Достаём сам подменённый сертификат, чтобы показать его эмитента.
+            try:
+                ctx2 = ssl.create_default_context()
+                ctx2.check_hostname = False
+                ctx2.verify_mode = ssl.CERT_NONE
+                with socket.create_connection((host, 443), timeout=10) as s2:
+                    with ctx2.wrap_socket(s2, server_hostname=host) as ss2:
+                        der = ss2.getpeercert(binary_form=True)
+                        # Грубо вытаскиваем CN из DER — без cryptography:
+                        # ищем все commonName-OID-фрагменты в дампе.
+                        import re
+                        text = der.decode("latin1", errors="ignore")
+                        cns = re.findall(r"[\x20-\x7e]{6,}", text)
+                        cn_hint = next(
+                            (s for s in cns if any(k in s.lower()
+                            for k in ("kaspersky", "eset", "drweb", "avast",
+                                     "dr.web", "antivirus", "proxy", "filter"))),
+                            cns[0] if cns else "?",
+                        )
+                        print(f"  {' '*30}   подменённый CN/строка: {cn_hint[:80]}")
+            except Exception as inner:
+                print(f"  {' '*30}   не удалось прочитать сертификат: {inner}")
+        except Exception as e:
+            print(f"  {host:30s} IP={ip:15s} TLS ОШИБКА: {type(e).__name__}: {str(e)[:60]}")
+
+
 async def probe_raw_wb(sku: str) -> None:
     """Прямые запросы к WB API разными способами — показываем сырой ответ."""
     print(f"\n--- Сырые запросы WB API (nm={sku}) ---")
@@ -144,6 +204,7 @@ async def main() -> None:
     print(f"  crawl4ai:   {'есть' if _HAVE_CRAWL4AI else 'НЕТ'}")
 
     probe_network_identity()
+    probe_dns_and_cert()
 
     urls = sys.argv[1:] or DEFAULT_URLS
 
