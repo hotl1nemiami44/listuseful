@@ -68,7 +68,6 @@ async def probe_raw_wb(sku: str) -> None:
     print("\n--- WB CDN (basket-NN.wbbasket.ru, статика) ---")
     if _HAVE_CURL:
         from curl_cffi import requests as cr
-        from app.parsers.base import _CA_BUNDLE
         from app.parsers.wildberries import WildberriesParser
         verify = _CA_BUNDLE if _CA_BUNDLE is not None else False
         basket = WildberriesParser._basket(sku)
@@ -105,7 +104,6 @@ def probe_network_identity() -> None:
         return
     try:
         from curl_cffi import requests as cr
-        from app.parsers.base import _CA_BUNDLE
         verify = _CA_BUNDLE if _CA_BUNDLE is not None else False
         r = cr.get("http://ip-api.com/json/?fields=query,country,countryCode,isp",
                    timeout=15, impersonate="chrome", verify=verify)
