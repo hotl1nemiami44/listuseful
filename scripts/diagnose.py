@@ -127,6 +127,32 @@ async def probe_raw_wb(sku: str) -> None:
             except Exception as e:
                 print(f"  {name}: ОШИБКА {type(e).__name__}: {str(e)[:80]}")
 
+    # Session-priming: вдруг card.wb.ru хочет куки, выданные главной страницей.
+    # Открываем сессию, заходим на wildberries.ru, потом с теми же куками — в API.
+    print("\n--- WB: проба с куками главной страницы (session priming) ---")
+    if _HAVE_CURL:
+        from curl_cffi import requests as cr
+        verify = _CA_BUNDLE if _CA_BUNDLE is not None else False
+        try:
+            sess = cr.Session(impersonate="chrome")
+            home = sess.get("https://www.wildberries.ru/", timeout=15, verify=verify)
+            cookies = "; ".join(f"{c.name}={c.value}" for c in sess.cookies.jar)
+            print(f"  GET wildberries.ru → HTTP {home.status_code}, куки: "
+                  f"{len(list(sess.cookies.jar))} шт. [{cookies[:80]}]")
+            r = sess.get(
+                "https://card.wb.ru/cards/v2/detail",
+                params={"appType": "1", "curr": "rub", "dest": "-1257786", "nm": sku},
+                headers={"Origin": "https://www.wildberries.ru",
+                         "Referer": "https://www.wildberries.ru/"},
+                timeout=15, verify=verify,
+            )
+            preview = r.text[:160].replace("\n", " ").strip()
+            print(f"  card.wb.ru с куками → HTTP {r.status_code}, длина {len(r.text)}")
+            if preview:
+                print(f"      тело: {preview}")
+        except Exception as e:
+            print(f"  ОШИБКА session priming: {type(e).__name__}: {str(e)[:80]}")
+
     # Брутфорс: ищем правильную корзину для этого vol — пробуем basket-01..basket-50
     print("\n--- WB CDN: ищем правильную корзину перебором ---")
     if _HAVE_CURL:
@@ -178,7 +204,8 @@ def probe_network_identity() -> None:
     try:
         from curl_cffi import requests as cr
         verify = _CA_BUNDLE if _CA_BUNDLE is not None else False
-        r = cr.get("http://ip-api.com/json/?fields=query,country,countryCode,isp",
+        # proxy/hosting/mobile — ключевые флаги: WB режет API для датацентровых IP.
+        r = cr.get("http://ip-api.com/json/?fields=query,country,countryCode,isp,org,as,proxy,hosting,mobile",
                    timeout=15, impersonate="chrome", verify=verify)
         if r.status_code == 200:
             d = r.json()
@@ -186,9 +213,21 @@ def probe_network_identity() -> None:
             print(f"  Твой IP:   {d.get('query')}")
             print(f"  Страна:    {d.get('country')} ({d.get('countryCode')})  {flag}")
             print(f"  Провайдер: {d.get('isp')}")
-            if d.get("countryCode") != "RU":
+            print(f"  Орг/AS:    {d.get('org') or '-'} / {d.get('as') or '-'}")
+            hosting = d.get("hosting")
+            proxy = d.get("proxy")
+            mobile = d.get("mobile")
+            print(f"  Тип сети:  hosting={hosting}  proxy={proxy}  mobile={mobile}")
+            if hosting or proxy:
+                print("  🚫 IP помечен как ДАТАЦЕНТР/ПРОКСИ — именно поэтому WB отдаёт")
+                print("     404/403/498 на API, но 200 на статическом CDN. WB режет")
+                print("     не-резидентские IP. РЕШЕНИЕ: укажи РЕЗИДЕНТНЫЙ российский")
+                print("     прокси в proxy_url (.env) или запусти с домашнего интернета.")
+            elif d.get("countryCode") != "RU":
                 print("  ⚠️  IP не российский — WB/Ozon будут блокировать запросы.")
                 print("      Выключи VPN или укажи российский proxy_url в .env")
+            else:
+                print("  ✅ IP выглядит резидентным российским — блок не из-за IP.")
         else:
             print(f"  Гео-сервис вернул HTTP {r.status_code}")
     except Exception as e:

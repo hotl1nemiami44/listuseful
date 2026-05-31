@@ -28,14 +28,12 @@ _BASKET_HINT_BOUNDS = [
 class WildberriesParser(BaseParser):
     marketplace = "wb"
 
-    # Все известные пути карточки WB. card.wb.ru — основной; u-card — зеркало;
-    # search.wb.ru/exactmatch — поисковый эндпоинт, иногда работает там, где card.wb.ru закрыт.
+    # Хосты карточки WB. card.wb.ru — основной; u-card — зеркало. Не плодим
+    # лишние пути на одном хосте: если хост отдал 404/403, другой путь на нём
+    # тоже не сработает, а лишние запросы провоцируют 429 (rate-limit).
     CARD_ENDPOINTS = (
         "https://card.wb.ru/cards/v2/detail",
         "https://u-card.wb.ru/cards/v2/detail",
-        "https://card.wb.ru/cards/v1/detail",
-        "https://u-card.wb.ru/cards/v1/detail",
-        "https://card.wb.ru/cards/v2/list",
     )
     # Поисковый эндпоинт (работает по text query — кидаем туда сам артикул)
     SEARCH_ENDPOINT = "https://search.wb.ru/exactmatch/ru/common/v5/search"
@@ -186,51 +184,71 @@ class WildberriesParser(BaseParser):
             ) from browser_err
 
     async def _fetch_from_api(self, sku: str) -> tuple[dict | None, Exception | None]:
-        # Минимальный набор параметров — некоторые шарды возвращают 404 при наличии
-        # лишних (spp, ab_testing). Если базовый набор не сработает — попробуем
-        # расширенный.
-        base_params = {"appType": "1", "curr": "rub", "dest": "-1257786", "nm": sku}
-        extended = dict(base_params, spp="30")
+        params = {"appType": "1", "curr": "rub", "dest": "-1257786", "nm": sku}
         last_error: Exception | None = None
         for endpoint in self.CARD_ENDPOINTS:
-            for params in (base_params, extended):
-                try:
-                    resp = await self._get(endpoint, params=params)
-                    data = resp.json()
-                except ParserError as e:
-                    last_error = e
-                    continue
-                except Exception as e:
-                    last_error = ParserError(f"WB: ошибка запроса {endpoint}: {e}")
-                    continue
+            try:
+                resp = await self._get(endpoint, params=params)
+                data = resp.json()
+            except ParserError as e:
+                last_error = e
+                continue
+            except Exception as e:
+                last_error = ParserError(f"WB: ошибка запроса {endpoint}: {e}")
+                continue
 
-                products = (data.get("data") or {}).get("products") or []
-                if products:
-                    return products[0], None
-                last_error = ParserError(f"WB: товар {sku} не найден ({endpoint})")
+            products = (data.get("data") or {}).get("products") or []
+            if products:
+                return products[0], None
+            last_error = ParserError(f"WB: товар {sku} не найден ({endpoint})")
 
-        # Финальная попытка: search.wb.ru — другой хост, иногда проходит
-        # когда card.wb.ru закрыт сетевыми фильтрами. Ищем по самому артикулу.
-        try:
-            resp = await self._get(self.SEARCH_ENDPOINT, params={
-                "appType": "1", "curr": "rub", "dest": "-1257786",
-                "query": sku, "resultset": "catalog",
-            })
-            data = resp.json()
+        # Финальная попытка: search.wb.ru — другой хост, иногда проходит когда
+        # card.wb.ru закрыт. Возвращает 429 при частых обращениях, поэтому
+        # повторяем с экспоненциальной задержкой.
+        product = await self._fetch_from_search(sku)
+        if isinstance(product, dict):
+            return product, None
+        if isinstance(product, Exception):
+            last_error = product
+
+        return None, last_error or ParserError("WB: все эндпоинты вернули ошибку")
+
+    async def _fetch_from_search(self, sku: str) -> dict | Exception | None:
+        """Поиск товара через search.wb.ru. Возвращает dict товара, либо
+        Exception с диагностикой. На 429 повторяет с backoff."""
+        import asyncio
+        params = {
+            "appType": "1", "curr": "rub", "dest": "-1257786",
+            "query": sku, "resultset": "catalog",
+        }
+        last_error: Exception | None = None
+        for attempt, delay in enumerate((0, 1.5, 4.0)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                resp = await self._get(self.SEARCH_ENDPOINT, params=params)
+                data = resp.json()
+            except ParserError as e:
+                last_error = e
+                # Повторяем только если это похоже на 429 (rate-limit)
+                if "429" not in str(e):
+                    break
+                continue
+            except Exception as e:
+                last_error = ParserError(f"WB: ошибка search.wb.ru: {e}")
+                break
+
             products = (data.get("data") or {}).get("products") or []
             for p in products:
                 if str(p.get("id")) == sku:
-                    return p, None
+                    return p
             if products:
-                last_error = ParserError(
-                    f"WB: search.wb.ru вернул {len(products)} товаров, но среди них нет {sku}"
+                return ParserError(
+                    f"WB: search.wb.ru вернул {len(products)} товаров, среди них нет {sku}"
                 )
-        except ParserError as e:
-            last_error = e
-        except Exception as e:
-            last_error = ParserError(f"WB: ошибка search.wb.ru: {e}")
-
-        return None, last_error or ParserError("WB: все эндпоинты вернули ошибку")
+            last_error = ParserError("WB: search.wb.ru вернул пустой список")
+            break
+        return last_error
 
     async def _parse_via_browser(self, sku: str) -> ParsedProduct:
         from app.parsers.base import find_jsonld_product
