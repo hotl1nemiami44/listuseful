@@ -59,29 +59,42 @@ async def probe_raw_wb(sku: str) -> None:
             try:
                 r = cr.get(ep, params=p, timeout=15, impersonate="chrome", verify=verify)
                 server = r.headers.get("server") or r.headers.get("Server") or "?"
-                preview = r.text[:120].replace("\n", " ") if r.status_code == 200 else ""
-                print(f"  {name}: HTTP {r.status_code} [server={server}] длина={len(r.text)} {preview}")
+                # Показываем тело ВСЕХ ответов — у 4xx из API часто JSON с диагностикой
+                preview = r.text[:200].replace("\n", " ").strip()
+                print(f"  {name}: HTTP {r.status_code} [server={server}] длина={len(r.text)}")
+                if preview:
+                    print(f"      тело: {preview}")
             except Exception as e:
                 print(f"  {name}: ОШИБКА {type(e).__name__}: {str(e)[:80]}")
 
-    # Дополнительно: статический CDN — должен быть доступен ВСЕГДА (без антибота)
-    print("\n--- WB CDN (basket-NN.wbbasket.ru, статика) ---")
+    # Брутфорс: ищем правильную корзину для этого vol — пробуем basket-01..basket-50
+    print("\n--- WB CDN: ищем правильную корзину перебором ---")
     if _HAVE_CURL:
         from curl_cffi import requests as cr
         from app.parsers.wildberries import WildberriesParser
         verify = _CA_BUNDLE if _CA_BUNDLE is not None else False
-        basket = WildberriesParser._basket(sku)
         vol = int(sku) // 100_000
         part = int(sku) // 1000
-        url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{sku}/info/ru/card.json"
-        try:
-            r = cr.get(url, timeout=15, impersonate="chrome", verify=verify)
-            preview = r.text[:120].replace("\n", " ") if r.status_code == 200 else ""
-            print(f"  basket-{basket} card.json: HTTP {r.status_code}  длина={len(r.text)}  {preview}")
-        except Exception as e:
-            print(f"  basket card.json: ОШИБКА {type(e).__name__}: {str(e)[:80]}")
-    else:
-        print("  curl_cffi: не установлен")
+        predicted = WildberriesParser._basket(sku)
+        print(f"  vol={vol}, part={part}, моя таблица предсказывает basket-{predicted}")
+
+        found = None
+        for n in range(1, 51):
+            basket = f"{n:02d}"
+            url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{sku}/info/ru/card.json"
+            try:
+                r = cr.get(url, timeout=8, impersonate="chrome", verify=verify)
+                if r.status_code == 200:
+                    found = basket
+                    preview = r.text[:150].replace("\n", " ")
+                    print(f"  ✅ basket-{basket}: HTTP 200, длина {len(r.text)}")
+                    print(f"      тело: {preview}")
+                    break
+            except Exception:
+                continue
+        if not found:
+            print("  ❌ Ни одна корзина (1..50) не отдала 200")
+            print("     → сетевая фильтрация режет *.wbbasket.ru, либо артикул удалён")
 
 
 def probe_network_identity() -> None:
