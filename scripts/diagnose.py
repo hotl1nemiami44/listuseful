@@ -7,6 +7,10 @@
 import asyncio
 import sys
 
+# На Windows curl_cffi требует SelectorEventLoopPolicy.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 # Чтобы скрипт работал из корня репозитория
 sys.path.insert(0, ".")
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 from abc import ABC, abstractmethod
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
@@ -23,6 +25,50 @@ except Exception:  # pragma: no cover - окружения без curl_cffi
 
 # httpx — резервный путь, если curl_cffi недоступен.
 import httpx
+
+# certifi обеспечивает рабочие CA-сертификаты для curl_cffi.
+import certifi
+
+
+def _safe_ca_bundle() -> Optional[str]:
+    """Возвращает путь к CA-бандлу, который libcurl сможет прочитать.
+
+    На Windows libcurl падает с `curl: (77)`, если путь к .pem содержит
+    не-ASCII символы (например, кириллица в имени пользователя:
+    C:\\Users\\Глеб\\...). В этом случае копируем бандл в ASCII-папку
+    (C:\\Users\\Public). Если не получилось — вернём None, и вызывающий
+    код отключит проверку сертификата.
+    """
+    try:
+        path = certifi.where()
+    except Exception:
+        return None
+    try:
+        path.encode("ascii")
+        return path  # путь уже безопасный (обычный случай на Linux/macOS)
+    except UnicodeEncodeError:
+        pass
+
+    candidates = []
+    if os.environ.get("PUBLIC"):  # C:\Users\Public — всегда ASCII и доступна на запись
+        candidates.append(os.path.join(os.environ["PUBLIC"], "price_tracker_cacert.pem"))
+    if os.environ.get("SystemRoot"):
+        candidates.append(os.path.join(os.environ["SystemRoot"], "Temp", "price_tracker_cacert.pem"))
+    candidates.append(os.path.join(os.path.abspath(os.sep), "price_tracker_cacert.pem"))
+
+    for dest in candidates:
+        try:
+            dest.encode("ascii")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copyfile(path, dest)
+            return dest
+        except Exception:
+            continue
+    return None
+
+
+# Вычисляем один раз при импорте
+_CA_BUNDLE = _safe_ca_bundle()
 
 # Playwright — резерв на случай отсутствия crawl4ai.
 try:
@@ -115,10 +161,15 @@ class BaseParser(ABC):
         return await self._get_httpx(url, headers=merged, params=params)
 
     async def _get_curl(self, url: str, *, headers: dict, params: Optional[dict]) -> _Response:
+        # verify: сначала пытаемся с CA-бандлом (безопасно), при ошибке
+        # сертификата — без проверки (curl (77) из-за не-ASCII пути на Windows).
+        verify: Any = _CA_BUNDLE if _CA_BUNDLE is not None else False
+        last_exc: Optional[Exception] = None
+
         # impersonate-таргет может отсутствовать в конкретной сборке curl_cffi —
         # пробуем настроенный, затем дефолтный "chrome", затем без impersonate.
         for target in (CURL_IMPERSONATE, "chrome", None):
-            kwargs = {"timeout": self.timeout}
+            kwargs: dict = {"timeout": self.timeout, "verify": verify}
             if target:
                 kwargs["impersonate"] = target
             try:
@@ -126,21 +177,25 @@ class BaseParser(ABC):
                     resp = await session.get(
                         url, headers=headers, params=params, allow_redirects=True
                     )
-            except (ValueError, RuntimeError) as e:
-                # обычно "impersonate target not found" — пробуем следующий
-                if target is None:
-                    raise ParserError(f"{self.marketplace}: curl_cffi: {e}") from e
-                continue
             except Exception as e:
-                raise ParserError(f"{self.marketplace}: сетевая ошибка: {e}") from e
+                last_exc = e
+                msg = str(e).lower()
+                # Ошибка сертификата → переключаемся на verify=False и пробуем снова
+                if verify is not False and (
+                    "certificate" in msg or "(77)" in msg or "cacert" in msg or "ssl" in msg
+                ):
+                    verify = False
+                continue
 
             if resp.status_code >= 400:
                 raise ParserError(
                     f"{self.marketplace}: HTTP {resp.status_code} от {resp.url}"
                 )
             return _Response(resp.status_code, resp.text, str(resp.url))
-        # сюда не доходим, но для типизации
-        raise ParserError(f"{self.marketplace}: curl_cffi не смог выполнить запрос")
+
+        raise ParserError(
+            f"{self.marketplace}: curl_cffi не смог выполнить запрос: {last_exc}"
+        )
 
     async def _get_httpx(self, url: str, *, headers: dict, params: Optional[dict]) -> _Response:
         async with httpx.AsyncClient(
@@ -189,12 +244,15 @@ class BaseParser(ABC):
             cache_mode=CacheMode.BYPASS,
             wait_until="domcontentloaded",
             page_timeout=int(self.timeout * 1000),
+            # Если селектор задан — ждём его; иначе даём JS-рендеру время.
             wait_for=f"css:{wait_selector}" if wait_selector else None,
             wait_for_timeout=8000,
+            delay_before_return_html=0.5 if wait_selector else 3.5,
             simulate_user=True,     # эмуляция движения мыши/скроллов
             magic=True,             # auto-bypass для популярных антиботов
             override_navigator=True,
             remove_overlay_elements=True,
+            scan_full_page=True,    # триггерит ленивую загрузку контента
             locale="ru-RU",
             verbose=False,
         )

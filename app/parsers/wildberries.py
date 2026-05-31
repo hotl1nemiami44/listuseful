@@ -155,29 +155,66 @@ class WildberriesParser(BaseParser):
         return None, last_error or ParserError("WB: все эндпоинты вернули ошибку")
 
     async def _parse_via_browser(self, sku: str) -> ParsedProduct:
+        from app.parsers.base import find_jsonld_product
         page_url = self.PRODUCT_PAGE.format(sku=sku)
-        resp = await self._get_browser(
-            page_url,
-            wait_selector=".price-block__final-price, .price-block__wallet-price",
-        )
-        tree = HTMLParser(resp.text)
+        # Не блокируемся на конкретном CSS — WB периодически меняет классы.
+        # Просто берём отрендеренный HTML и парсим из всех возможных источников.
+        resp = await self._get_browser(page_url, wait_selector=None)
+        html = resp.text
+        tree = HTMLParser(html)
 
+        # 1. JSON-LD (есть у любого SEO-чувствительного товара)
+        jsonld = find_jsonld_product(html)
+        if jsonld:
+            offers = jsonld.get("offers")
+            if isinstance(offers, list) and offers:
+                offers = offers[0]
+            if isinstance(offers, dict):
+                price = to_decimal_price(offers.get("price") or offers.get("lowPrice"))
+                if price is not None and price > 0:
+                    title = (jsonld.get("name") or f"Товар WB {sku}").strip()
+                    return ParsedProduct(
+                        title=title, price=price, image_url=self._image_url(sku)
+                    )
+
+        # 2. Classes-based селекторы (несколько поколений вёрстки WB)
         price = None
         for selector in (
-            ".price-block__final-price",
             "ins.price-block__final-price",
+            ".price-block__final-price",
             ".price-block__wallet-price",
             '[class*="price-block__final-price"]',
+            '[class*="priceBlockFinalPrice"]',
+            'span[class*="finalPrice"]',
+            'span[data-link*="priceProduct"]',
         ):
             node = tree.css_first(selector)
             if node:
                 price = to_decimal_price(node.text())
                 if price is not None and price > 0:
                     break
-        if price is None:
-            raise ParserError("WB: цена не найдена на странице товара")
 
-        title_node = tree.css_first("h1.product-page__title") or tree.css_first("h1")
+        # 3. OG-метатеги
+        if price is None:
+            og_price = tree.css_first('meta[property="product:price:amount"]') \
+                or tree.css_first('meta[property="og:price:amount"]')
+            if og_price:
+                price = to_decimal_price(og_price.attributes.get("content"))
+
+        # 4. Регэксп по сырому HTML — последний шанс ("1 299 ₽")
+        if price is None:
+            m = re.search(r'(\d[\d\s\xa0]{0,7})\s*(?:&nbsp;)?₽', html)
+            if m:
+                price = to_decimal_price(m.group(1))
+
+        if price is None or price <= 0:
+            raise ParserError("WB: цена не найдена на странице товара (вёрстка изменилась)")
+
+        title_node = (
+            tree.css_first("h1.product-page__title")
+            or tree.css_first('h1[data-link*="productName"]')
+            or tree.css_first("h1")
+        )
         title = title_node.text(strip=True) if title_node else f"Товар WB {sku}"
 
         return ParsedProduct(
